@@ -1,6 +1,6 @@
+use std::{thread as stdth, time};
 use std::fs::File;
 use std::io::prelude::*;
-use std::ops::Deref;
 use std::path::Path;
 use core::ops::Range;
 use indicatif::ProgressBar;
@@ -8,8 +8,7 @@ use std::f64::consts;
 use crossbeam_channel::Sender;
 use rand::thread_rng;
 use rand::Rng;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{RwLock, Mutex, Arc};
 use crossbeam_channel::Receiver;
 use executors::parker::SmallThreadData;
 use ndarray::prelude::*;
@@ -114,20 +113,30 @@ pub struct Driver {
     y_size: usize,
     total_nodes: usize,
     sym_type: SymmetryType,
+    J: f64,
     num_threads: usize,
     div: usize,
     rem: usize,
-    threads_started: bool,
+    magnitiztion_threads_started: bool,
+    cluster_threads_started: bool,
     mag_pool: ThreadPool<StaticParker<SmallThreadData>>,
-    energy_pool: ThreadPool<StaticParker<SmallThreadData>>,
+    cluster_pool: ThreadPool<StaticParker<SmallThreadData>>,
     tx_psum: Sender<f64>,
     rx_psum: Receiver<f64>,
     tx_go_psum: Sender<SignalType>,
     rx_go_psum: Receiver<SignalType>,
+    flip_index_vector: Arc<RwLock<Vec<usize>>>,
+    process_index_vector: Arc<RwLock<Vec<usize>>>,
+    tx_go_cluster: Sender<(SignalType, f64)>,
+    rx_go_cluster: Receiver<(SignalType, f64)>,
+    tx_done_cluster: Sender<usize>,
+    rx_done_cluster: Receiver<usize>,
+    tx_cluster_queue: Sender<(usize, f64)>,
+    rx_cluster_queue: Receiver<(usize, f64)>,
 }
 
 impl Driver {
-    pub fn new(x_size: usize, y_size: usize, sym_type: SymmetryType, inner_basis: Array2<f64>) -> Self { 
+    pub fn new(J: f64, x_size: usize, y_size: usize, sym_type: SymmetryType, inner_basis: Array2<f64>) -> Self { 
         assert!(x_size > 0, "size must be greater than zero!");
         assert!(y_size > 0, "size must be greater than zero!");
         let cpu_num = num_cpus::get();
@@ -342,8 +351,10 @@ impl Driver {
         println!("Done!");
         let (tx_psum, rx_psum) = bounded(cpu_num);
         let (tx_go_psum, rx_go_psum) = bounded(cpu_num);
-        // let (tx_energy, rx_energy) = bounded(cpu_num);
-        // let (tx_go_energy, rx_go_energy) = bounded(cpu_num);
+        // let (tx_flip_index, rx_flip_index) = unbounded();
+        let (tx_go_cluster, rx_go_cluster) = bounded(cpu_num);
+        let (tx_cluster_queue, rx_cluster_queue) = unbounded();
+        let (tx_done_cluster, rx_done_cluster) = bounded(cpu_num);
         Self {
             internal_lattice: lattice::new(give_map),
             basis: RwLock::new(inner_basis),
@@ -351,46 +362,140 @@ impl Driver {
             y_size,
             total_nodes: x_size * y_size,
             sym_type,
+            J,
             num_threads: cpu_num,
             div,
             rem,
-            threads_started: false,
+            magnitiztion_threads_started: false,
+            cluster_threads_started: false,
             mag_pool: crossbeam_workstealing_pool::small_pool(cpu_num),
-            energy_pool: crossbeam_workstealing_pool::small_pool(cpu_num),
+            cluster_pool: crossbeam_workstealing_pool::small_pool(cpu_num),
             tx_psum,
             tx_go_psum,
             rx_psum,
             rx_go_psum,
+            flip_index_vector: Arc::new(RwLock::new(vec![])),
+            process_index_vector: Arc::new(RwLock::new(vec![])),
+            tx_go_cluster,
+            rx_go_cluster,
+            tx_done_cluster,
+            rx_done_cluster,
+            tx_cluster_queue,
+            rx_cluster_queue,
 
         }
     }
 
-    fn start_threads(&mut self) {
-        if self.threads_started != true {
+    fn start_magnitization_threads(&mut self) {
+        if self.magnitiztion_threads_started != true {
             let n_jobs = self.num_threads.clone();
             // let (finished_tx, finished_rx) = channel();
             for i in 0..n_jobs {
-                println!("starting thread {i}");
+                println!("starting magnitization thread {i}");
                 let shared_data = self.internal_lattice.internal_vector.clone();
                 let tx_psum = self.tx_psum.clone();
                 let rx_go_psum = self.rx_go_psum.clone();
-                let range = 0..2;
+                let range: std::ops::Range<usize>;
+                if i != n_jobs - 1 {
+                    range = (i * self.div)..((i+1) * self.div);
+                } else {
+                    // get the remainder in the last thread. We could smear it out amongst the threads
+                    // but this is easier for all edge cases.
+                    range = (i * self.div)..((i+1) * self.div + self.rem);
+                }
 
                 self.mag_pool.execute(move || {
 
                     'outer : loop {
                         let mut psum = 0.;
-                        match rx_go_psum.recv().unwrap() {
-                            SignalType::SigStart => {
-                                match shared_data.read().as_deref() {
-                                    Ok(value) => {
-                                        for item in value {
-                                            psum += item.get_spin();
-                                        }
-                                    },
-                                    Err(_) => panic!("couldnt read shared data in thread!"), 
+                        if let SignalType::SigStart = rx_go_psum.recv().unwrap() {
+                            if let Ok(shared_vector) = shared_data.read().as_deref() {
+                                for index in range.clone() {
+                                    // SAFETY: bounds are explicitly known when range is generated
+                                    // and garuntees a valid return.
+                                    unsafe {
+                                        psum += shared_vector.get_unchecked(index).get_spin();
+                                    }
                                 }
-                                tx_psum.send(psum).unwrap();
+                            } else {
+                                panic!("couldnt read shared data in thread!")
+                            }
+                            tx_psum.send(psum).unwrap();
+                        } else {
+                            println!("stopping thread");
+                            return;
+                        }
+                    }
+
+                });
+            } // for i in 0..n_jobs
+        }
+        self.magnitiztion_threads_started = true;
+    }
+
+    fn start_cluster_threads(&mut self, ) {
+        if self.cluster_threads_started != true {
+            let n_jobs = self.num_threads.clone();
+            // let (finished_tx, finished_rx) = channel();
+            for i in 0..n_jobs {
+                println!("starting cluster thread {i}");
+                let shared_processed_vec = self.process_index_vector.clone();
+                let shared_flip_vec = self.flip_index_vector.clone();
+                let shared_data = self.internal_lattice.internal_vector.clone();
+                let rx_go_cluster = self.rx_go_cluster.clone();
+                let tx_cluster_queue = self.tx_cluster_queue.clone();
+                let rx_cluster_queue = self.rx_cluster_queue.clone();
+                let tx_done_cluster = self.tx_done_cluster.clone();
+                self.cluster_pool.execute(move || {
+                    let mut rng = thread_rng();
+                    'outer : loop {
+                        let sent_signal = rx_go_cluster.recv().unwrap();
+                        match sent_signal.0 {
+                            SignalType::SigStart => {
+                                // println!("Thread received go signal");
+                                'inner : loop {
+                                    if let Ok(shared_vector) = shared_data.read().as_deref() {
+                                        // pop a value from the work queue if available, else move to waiting for next go signal.
+                                        if let Ok(check_index) = rx_cluster_queue.try_recv() {
+                                            // SAFETY: index is checked in calling function and nodes only store valid
+                                            // indicies to other nodes.
+                                            unsafe {
+                                                // println!("getting read_lock");
+                                                let read_lock = shared_vector.get_unchecked(check_index.0)
+                                                                                             .neighbors
+                                                                                             .read()
+                                                                                             .unwrap();
+                                                for i in 0..read_lock.len() {
+                                                    // println!("iterating neighbor {i}");
+                                                    let nbr_index = *read_lock.get_unchecked(i);
+                                                    let nbr_spin = shared_vector.get_unchecked(nbr_index).get_spin();
+                                                    if nbr_spin == check_index.1 {
+                                                        // println!("Spins were the same");
+                                                        let read_lock_shared_flip_vec = shared_flip_vec.read().unwrap();
+                                                        if read_lock_shared_flip_vec.contains(&nbr_index) {
+                                                            // println!("{} was in read_lock_shared_flip_vec", &nbr_index);
+                                                            continue 'inner
+                                                        } else
+                                                        if rng.gen_range(0_f64..1_f64) < sent_signal.1 {
+                                                            drop(read_lock_shared_flip_vec);
+                                                            let mut write_lock = shared_flip_vec.write().unwrap();
+                                                            // println!("pushing {} to flip channel", nbr_index);
+                                                            write_lock.push(nbr_index);
+                                                            tx_cluster_queue.send((nbr_index, nbr_spin)).unwrap();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // println!("thread done");
+                                            // send done signal to main
+                                            tx_done_cluster.send(1).unwrap();
+                                            continue 'outer
+                                        }
+                                    } else {
+                                        panic!("couldnt read shared data in thread!")
+                                    }
+                                }
                             },
                             SignalType::SigStop => {
                                 println!("stopping thread");
@@ -402,27 +507,33 @@ impl Driver {
                 });
             } // for i in 0..n_jobs
         }
-        self.threads_started = true;
+        self.cluster_threads_started = true;
     }
 
-    fn stop_threads(&self) {
+    pub fn stop_threads(self) {
         // for _ in 0..self.num_threads {
         //     self.tx_go.send(SignalType::SigStop).unwrap();
         // }
         println!("I am not even going to bother with figuring out how to do this as the threads just wont die no matter what I do, so live with all the errors, though know that they are really just the OS complaining that the threads are still alive or were already killed. Not much I can do with my current understanding of this language.\n");
-        let mut count = 0;
-        loop {
-            match self.mag_pool.shutdown_borrowed() {
-                Ok(_) => break,
-                Err(why) => {
-                    count += 1;
-                    println!("{}", why);
-                    if count == 4 {
-                        break;
-                    }
-                    continue;
-                },
-            }
+        // let mut count = 0;
+        // loop {
+        //     match self.mag_pool.shutdown_borrowed() {
+        //         Ok(_) => break,
+        //         Err(why) => {
+        //             count += 1;
+        //             println!("{}", why);
+        //             if count == 4 {
+        //                 break;
+        //             }
+        //             continue;
+        //         },
+        //     }
+        // }
+        if self.magnitiztion_threads_started {
+            drop(self.tx_go_psum);
+        }
+        if self.cluster_threads_started {
+            drop(self.tx_go_cluster);
         }
         println!("threads closed, or not. They may throw a panic, but this technically kills them so its all good. just ignore the incoming text wall...\n")
     }
@@ -462,9 +573,15 @@ impl Driver {
                 for i in range {
                     match self.sym_type {
                         SymmetryType::C3V => {
-
+                            // 3 neighbors at most, so 0..3 is the range
+                            for j in 0..3 {
+                                if let Some(valid_index) = indexmod(i, j, self.x_size, self.y_size, self.sym_type) {
+                                    psum += self.get_spin_at(valid_index);
+                                }
+                            }
                         },
                         SymmetryType::C4V => {
+                            // 4 neighbors at most, so 0..4 is the range
                             for j in 0..4 {
                                 if let Some(valid_index) = indexmod(i, j, self.x_size, self.y_size, self.sym_type) {
                                     psum += self.get_spin_at(valid_index);
@@ -472,6 +589,7 @@ impl Driver {
                             }
                         },
                         SymmetryType::C6V => {
+                            // 6 neighbors at most, so 0..6 is the range
 
                         },
                     }
@@ -488,16 +606,25 @@ impl Driver {
     fn get_energy<'a>(&'a self) -> f64 {
         let mut energy = 0.;
         for i in 0usize..self.num_threads {
-            let range = (i * self.div)..((i+1) * self.div);
+            let range: std::ops::Range<usize>;
+                if i != self.num_threads - 1 {
+                    range = (i * self.div)..((i+1) * self.div);
+                } else {
+                    // Get the remainder in the last thread spawned. We could smear it out amongst
+                    // the other threads, but this is easier for all edge cases.
+                    range = (i * self.div)..((i+1) * self.div + self.rem);
+                }
             energy += self.energy_worker(range);
         }
         return energy;
     }
 
-    pub fn spin_energy(&mut self, beta_list: Vec<f64>, times: usize) {
-        self.start_threads();
+    pub fn spin_energy(&mut self, beta_list: Vec<f64>, times: usize, iteration_scheme: usize) {
+        self.start_magnitization_threads();
+        if iteration_scheme == 1 {
+            self.start_cluster_threads();
+        }
         let magnitization = self.get_magnitization();
-        let return_vec = Box::new(vec![1.,2.]);
         
         let mut energy = self.get_energy();
         println!("The initial energy is {}", energy);
@@ -513,18 +640,26 @@ impl Driver {
         let mut E: Vec<f64> = vec![];
         let mut C: Vec<f64> = vec![];
         let mut X: Vec<f64> = vec![];
+        let n1 = (self.total_nodes as f64).powf(2.)*(times as f64);
+        let n2 = (self.total_nodes as f64).powf(2.)*(times as f64).powf(2.);
         
         let len_beta = beta_list.len();
         let tot_time: u64 = times as u64 * len_beta as u64;
 
-        println!("Creating bar1 for spin-energy calculation");
         let bar1 = ProgressBar::new(tot_time);
 
         for beta_val in beta_list {
             // let mut run_avg: Vec<f64> = vec![];
             // let mut cur_run_sum = 0.; 
-            for i in 0..times {
-                energy = self.metropolis_iter(&beta_val, energy);
+            for _ in 0..times {
+                if iteration_scheme == 0 {
+                    energy = self.metropolis_iter(&beta_val, energy);
+                } else
+                if iteration_scheme == 1 {
+                    energy = self.wolff_iter(&beta_val, energy);
+                } else {
+                    panic!("invalid option! expected 0 or 1, got {}", iteration_scheme);
+                }
                 let cur = self.get_magnitization();
                 Ms[0] += magnitization.abs();
                 Ms[1] += magnitization.powf(2.);
@@ -533,18 +668,13 @@ impl Driver {
                 // cur_run_sum += cur;
                 M.push(cur / self.total_nodes as f64);
                 E.push(energy / self.total_nodes as f64);  // TODO add in actual value
-                C.push(Es[1] / ((self.total_nodes as f64 -1.)*(times as f64).powf(2.)) - 
-                Es[0].powf(2.) / (self.total_nodes as f64 -1.)*(times as f64).powf(2.) *
-                       beta_val.powf(2.));
-                       X.push(Ms[1] / ((self.total_nodes as f64 -1.)*(times as f64).powf(2.)) - 
-                       Ms[0].powf(2.) / (self.total_nodes as f64 -1.)*(times as f64).powf(2.) *
-                       beta_val);
-                       bar1.inc(1);
-                    }
-                energy_vec.push(energy.clone());
+                C.push(Es[1] / n1 - Es[0].powf(2.) / n2 * beta_val.powf(2.));
+                X.push(Ms[1] / n1 - Ms[0].powf(2.) / n2 * beta_val);
+                bar1.inc(1);
             }
+            energy_vec.push(energy.clone());
+        }
         bar1.abandon();
-        self.stop_threads();
         println!("spin_energy finished! Writing data to file, 少々お待ちして下さい");
         let bar2 = ProgressBar::new_spinner();
         
@@ -645,14 +775,15 @@ impl Driver {
         // the Wolff Algorithm.
         //
         // if the required threads are not alive already, launch them.
-        let balcond = 1. - consts::E.powf(-2.*beta);
+        let balcond = 1. - consts::E.powf(-2.*beta*self.J);
+        // println!("{balcond}");
         let mut rngx = thread_rng();
         let mut rngy = thread_rng();
         let mut rng_flip = thread_rng();
         let mut x_y = 0;
         let mut target_spin = 0.;
-        let dE = 0.;
-        let (tx_cluster, rx_cluster) = unbounded();
+        let mut dE = 0.;
+        // let (tx_cluster, rx_cluster) = unbounded();
 
         // pick random point
         'node_selection : loop {
@@ -674,16 +805,46 @@ impl Driver {
                         if self.get_spin_at(nbr_index) == target_spin {
                             // if the index is the same as the randomly picked node, add it to the
                             // queue.
-                            tx_cluster.send(nbr_index);
+                            let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap();
+                            write_lock_flip_index_vector.push(nbr_index);
+                            self.tx_cluster_queue.send((nbr_index, target_spin)).unwrap();
+                            drop(write_lock_flip_index_vector);
                         }
                     }
                 }
             }
         }
-        // spin up threads for generating a cluster flip.
 
-        //TODO
+        // spin up threads for generating a cluster flip and then wait for them to finish.
+        // println!("sending go signal to cluster threads");
+        for _ in 0..self.num_threads {
+            self.tx_go_cluster.send((SignalType::SigStart, balcond)).unwrap();
+        }
+        // println!("waiting for threads to finish...");
+        while self.rx_done_cluster.is_full() == false {
+            stdth::sleep(time::Duration::from_micros(10));
+        }
+        // println!("Clearing queue");
+        for _ in 0..self.num_threads {
+            // clear the queue
+            _ = self.rx_done_cluster.recv().unwrap();
+        }
 
+        // flip spins and calculate the path integral value of the change in energy dE
+        let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap(); 
+        loop {
+            // while the flip queue is not empty, process nodes
+            if let Some(cur_flip_index) = write_lock_flip_index_vector.pop() {
+                if rng_flip.gen_range(0_f64..1_f64) < balcond {
+                    let nbr_E = self.get_neighbors_spin_sum(cur_flip_index);
+                    dE += 2.*target_spin*nbr_E;
+                    self.flip_node_at(cur_flip_index);
+                }
+            } else {
+                break
+            }
+        }
+        drop(write_lock_flip_index_vector);
         return energy + dE;
     }
 
@@ -711,7 +872,7 @@ impl Driver {
             self.flip_node_at(x_y);
             // dE = 2.*target_spin*nbr_E;
         }
-        else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*dE) {
+        else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.J*dE) {
             self.flip_node_at(x_y);
             // dE = 2.*target_spin*nbr_E;
         }
