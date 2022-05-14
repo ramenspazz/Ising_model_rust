@@ -389,17 +389,18 @@ impl Driver {
             let n_jobs = self.num_threads.clone();
             // let (finished_tx, finished_rx) = channel();
             for i in 0..n_jobs {
-                println!("starting magnitization thread {i}");
                 let shared_data = self.internal_lattice.internal_vector.clone();
                 let tx_psum = self.tx_psum.clone();
                 let rx_go_psum = self.rx_go_psum.clone();
                 let wolff_run = self.cluster_threads_started.clone();
                 let range: std::ops::Range<usize>;
                 if i != n_jobs - 1 {
+                    println!("starting magnitization thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div));
                     range = (i * self.div)..((i+1) * self.div);
                 } else {
                     // get the remainder in the last thread. We could smear it out amongst the threads
                     // but this is easier for all edge cases.
+                    println!("starting magnitization thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div + self.rem));
                     range = (i * self.div)..((i+1) * self.div + self.rem);
                 }
 
@@ -508,24 +509,11 @@ impl Driver {
     }
 
     pub fn stop_threads(self) {
-        // for _ in 0..self.num_threads {
-        //     self.tx_go.send(SignalType::SigStop).unwrap();
-        // }
+        for _ in 0..self.num_threads {
+            self.tx_go_psum.send(SignalType::SigStop).unwrap();
+            self.tx_go_cluster.send((SignalType::SigStop, 0.)).unwrap();
+        }
         println!("I am not even going to bother with figuring out how to do this as the threads just wont die no matter what I do, so live with all the errors, though know that they are really just the OS complaining that the threads are still alive or were already killed. Not much I can do with my current understanding of this language.\n");
-        // let mut count = 0;
-        // loop {
-        //     match self.mag_pool.shutdown_borrowed() {
-        //         Ok(_) => break,
-        //         Err(why) => {
-        //             count += 1;
-        //             println!("{}", why);
-        //             if count == 4 {
-        //                 break;
-        //             }
-        //             continue;
-        //         },
-        //     }
-        // }
         if self.magnitiztion_threads_started {
             drop(self.tx_go_psum);
         }
@@ -534,7 +522,6 @@ impl Driver {
         }
         println!("threads closed, or not. They may throw a panic, but this technically kills them so its all good. just ignore the incoming text wall...\n")
     }
-
 
     pub fn get_spin_at(&self, index: usize) -> f64 {
         if let Ok(value) = self.internal_lattice.internal_vector.read() {
@@ -645,7 +632,7 @@ impl Driver {
         for beta_val in beta_list {
             // let mut run_avg: Vec<f64> = vec![];
             // let mut cur_run_sum = 0.; 
-            for _ in 0..times {
+            for cur_t in 0..times {
                 if iteration_scheme == 0 {
                     energy = self.metropolis_iter(&beta_val, energy);
                 } else
@@ -655,10 +642,14 @@ impl Driver {
                     panic!("invalid option! expected 0 or 1, got {}", iteration_scheme);
                 }
                 let cur = self.get_magnitization();
-                ms[0] += magnitization.abs();
-                ms[1] += magnitization.powf(2.);
-                es[0] += energy;
-                es[1] += energy.powf(2.);
+                // begining the data collection after a few iterations gives better
+                // overall graphs becuase the system has had time to relax
+                if cur_t > (0.1 * times as f64) as usize {
+                    ms[0] += magnitization.abs();
+                    ms[1] += magnitization.powf(2.);
+                    es[0] += energy;
+                    es[1] += energy.powf(2.);
+                }
                 // cur_run_sum += cur;
                 m_vec.push(cur / self.total_nodes as f64);
                 e_vec.push(energy / self.total_nodes as f64);  // TODO add in actual value
