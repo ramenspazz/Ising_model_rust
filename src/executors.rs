@@ -1,60 +1,49 @@
-use executors::*;
-use executors::crossbeam_workstealing_pool;
-use std::sync::{Arc, RwLock};
+
+
+extern crate rand;
+
+use std::io;
 use std::sync::mpsc::channel;
+use ising_model;
 
-struct lattice {
-    test_vec: Arc<RwLock<Vec<i32>>>,
-}
+// import commonly used items from the prelude:
+use executors::*;
+use ising_model::atomistic_simulation::SymmetryType;
+use ndarray::prelude::*;
 
-impl lattice {
-    fn new() -> Self {
-        Self {
-            test_vec: Arc::new(RwLock::new(vec![])),
-        }
+
+fn get_input_as_usize() -> usize {
+    let mut usrin = String::from("");
+    loop {
+        io::stdin()
+            .read_line(&mut usrin)
+            .expect("Failed to read line");
+    
+        let usrin: usize = match usrin.trim().parse() {
+            Ok(num) => return num,
+            Err(_) => continue,
+        };
     }
-
-    fn push(&mut self, item: i32) {
-        match self.test_vec.write().as_mut() {
-            Ok(value) => value.push(item),
-            Err(_) => return,
-        }
-    }
-}
-
-fn thread_func(tx: std::sync::mpsc::Sender<i32>, vec_obj: &Arc<RwLock<Vec<i32>>>) {
-    // get a ref to the test_vec and then sum it
-    let mut psum = 0;
-    match vec_obj.read().as_deref() {
-        Ok(value) => {
-            for item in value {
-                psum += item;
-            }
-        },
-        Err(_) => return, 
-    }
-    tx.send(psum).unwrap();
 }
 
 fn main() {
-    let n_workers = 1;
-    let n_jobs = 1;
-    let pool = crossbeam_workstealing_pool::small_pool(n_workers);
-    let mut test_lat = lattice::new();
+    println!("enter the x, then the y size of the system in terms of two basis vectors: ");
+    let mut test_driver = ising_model::atomistic_simulation::Driver::new(
+        get_input_as_usize(),
+        get_input_as_usize(),
+        SymmetryType::C4V,
+        array![[1., 0.], [0., 1.]],
+    );
 
-    for i in 1..5 {
-        test_lat.push(i);
+    let times = 100000;
+    let start = 0.01;
+    let end = 10.;
+    println!("Enter the number of beta values to calculate in the range {} to {}: ", start, end);
+    let num_points = get_input_as_usize();
+    let step = (end - start) / num_points as f64;
+    let mut beta_list = vec![];
+    for i in 1..(num_points + 1) {
+        beta_list.push((i as f64) * step + start);
     }
-
-    let (tx, rx) = channel();
-    // let (finished_tx, finished_rx) = channel();
-
-    for _ in 0..n_jobs {
-        let shared_data = test_lat.test_vec.clone();
-        let tx = tx.clone();
-        pool.execute(move || thread_func(tx, &shared_data));
-    }
-
-    println!("{}", rx.iter().take(n_jobs).fold(0, |a, b| a + b));
-    println!("Ok");
+    test_driver.spin_energy(beta_list, times);
 }

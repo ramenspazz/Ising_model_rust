@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::prelude::*;
+use std::ops::Deref;
 use std::path::Path;
 use core::ops::Range;
 use indicatif::ProgressBar;
@@ -123,10 +124,27 @@ impl Driver {
                         let genval: f64 = rng.gen();
                         // randomization conditions would go here or somewhere near here.
                         cur_coord = Box::new((i as f64) * &inner_basis.slice(&s1) + (j as f64) * &inner_basis.slice(&s2));
+                        // construct neighbors vector
+                        let mut neighbors = vec![];
+                        for modnum in 0..4 {
+                            if let Some(valid_index) = indexmod(i+j*x_size, modnum, x_size, y_size, sym_type) {
+                                neighbors.push(valid_index);
+                            }
+                        }
                         if genval >= 0.5 {
-                            give_map.push(SpinNode::cons_node(0.5, array![i as f64, j as f64], *cur_coord));
+                            give_map.push(
+                                SpinNode::cons_node(
+                                    0.5, 
+                                    array![i as f64, j as f64], 
+                                    *cur_coord, 
+                                    RwLock::new(neighbors)));
                         } else {
-                            give_map.push(SpinNode::cons_node(-0.5, array![i as f64, j as f64], *cur_coord));
+                            give_map.push(
+                                SpinNode::cons_node(
+                                    -0.5,
+                                    array![i as f64, j as f64],
+                                    *cur_coord,
+                                    RwLock::new(neighbors)));
                         }
                     }
                 }
@@ -197,9 +215,19 @@ impl Driver {
                         // randomization conditions would go here or somewhere near here.
                         let genval: f64 = rng.gen();
                         if genval >= 0.5 {
-                            give_map.push(SpinNode::cons_node(0.5, array![i as f64, j as f64], *cur_coord.clone()));
+                            give_map.push(
+                                SpinNode::cons_node(
+                                    0.5,
+                                    array![i as f64, j as f64],
+                                    *cur_coord.clone(),
+                                    RwLock::new(vec![])));
                         } else {
-                            give_map.push(SpinNode::cons_node(-0.5, array![i as f64, j as f64], *cur_coord.clone()));
+                            give_map.push(
+                                SpinNode::cons_node(
+                                    -0.5,
+                                    array![i as f64, j as f64],
+                                    *cur_coord.clone(),
+                                    RwLock::new(vec![])));
                         }
                         if i % 2 == 0 {
                             // when we are on an even increment of b2
@@ -341,12 +369,13 @@ impl Driver {
 
 
     pub fn get_spin_at(&self, index: usize) -> f64 {
-        match self.internal_lattice.internal_vector.read() {
-            Ok(value) => match value.get(index) {
-                Some(node) => node.get_spin(),
-                None => 0.,
-            },
-            Err(_) => panic!("couldnt get spin"),
+        if let Ok(value) = self.internal_lattice.internal_vector.read() {
+            match value.get(index) {
+            Some(node) => {node.get_spin()},
+            None => 0.,
+        }
+        } else {
+            panic!("couldnt get spin")
         }
     }
 
@@ -620,8 +649,16 @@ impl Driver {
         match self.sym_type {
             SymmetryType::C4V => {
                 // calculate the sum of energy of the neighbors
-                for i in 0..4 {
-                    nbr_E += self.get_spin_at(indexmod(x_y, i, self.x_size, self.y_size, self.sym_type).unwrap_or_default());
+                if let Ok(value) = self.internal_lattice.internal_vector.read() {
+                    if let Some(node) = value.get(x_y) {
+                        let nbrs_thing = node.neighbors.read().unwrap();
+                        for i in 0..nbrs_thing.len() {
+                            // SAFETY: bounds checked in random node selection, garaunteed valid return
+                            unsafe {
+                                nbr_E += self.get_spin_at(*nbrs_thing.get_unchecked(i));
+                            }
+                        }
+                    }
                 }
                 dE = 2.*target_spin*nbr_E;
                 if dE <= 0. {

@@ -1,18 +1,21 @@
 use ndarray::prelude::*;
+use std::sync::RwLock;
 
 pub struct SpinNode {
     spin: QuantumSpin,
     pos: Array1<f64>,
     coords: Array1<f64>,
+    pub neighbors: RwLock<Vec<usize>>, 
 }
 
 impl SpinNode {
 
-    pub fn cons_node(init_spin: f64, pos: Array1<f64>, coords: Array1<f64>) -> SpinNode {
+    pub fn cons_node(init_spin: f64, pos: Array1<f64>, coords: Array1<f64>, neighbors: RwLock<Vec<usize>>) -> SpinNode {
         SpinNode {
             spin: QuantumSpin::new(Some(init_spin)),
             pos,
             coords,
+            neighbors,
         }
     }
 
@@ -21,6 +24,7 @@ impl SpinNode {
             spin: QuantumSpin::new(None),
             pos: Array1::<f64>::zeros(2),
             coords: Array1::<f64>::zeros(2),
+            neighbors: RwLock::new(vec![]),
             } 
     }
 
