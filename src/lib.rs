@@ -1,4 +1,4 @@
-pub fn DividendRemainder(dividend: usize,
+pub fn dividend_remainder(dividend: usize,
     divisor: usize) -> (usize, usize) {
         // Purpose
         // -------
@@ -30,25 +30,24 @@ pub fn DividendRemainder(dividend: usize,
             return (dividend / divisor, 0);
         }
     
-        let mut test: usize = 0;
         let mut div_power: usize = 0;
-        let mut quotient: usize = 0;
+        let mut current_quotient: usize = 0;
         let mut prev: usize = 0;
 
         loop {
-            test = (divisor << div_power) + (divisor * quotient);
+            let test_quotient = (divisor << div_power) + (divisor * current_quotient);
         
-            if test > dividend && prev < dividend {
+            if test_quotient > dividend && prev < dividend {
                 if prev + divisor > dividend {
-                    return (quotient + (2 << div_power - 2), dividend - prev);
+                    return (current_quotient + (2 << div_power - 2), dividend - prev);
                 }
-                quotient += 2 << (div_power - 2);
+                current_quotient += 2 << (div_power - 2);
                 div_power = 0;
-                prev = quotient * divisor;
+                prev = current_quotient * divisor;
                 continue;
             }
-            else if test < dividend {
-                prev = test;
+            else if test_quotient < dividend {
+                prev = test_quotient;
                 div_power += 1;
                 continue;
             }

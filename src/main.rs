@@ -1,11 +1,6 @@
 extern crate rand;
-
 use std::io;
-use std::sync::mpsc::channel;
 use ising_model;
-
-// import commonly used items from the prelude:
-use executors::*;
 use ising_model::atomistic_simulation::SymmetryType;
 use ndarray::prelude::*;
 
@@ -85,7 +80,7 @@ fn main() {
         beta_list.push((i as f64) * step + start);
     }
 
-    let mut usrin: usize = 0;
+    let mut usrin: usize;
     loop {
         usrin = get_input_as_usize(Some("Enter 0 to run a C3V lattice, or 1 to run C4V symmety lattice: "));
         println!("{usrin}");

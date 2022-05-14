@@ -1,11 +1,35 @@
 use ndarray::prelude::*;
 use std::sync::RwLock;
 
+pub struct TrueFalse {
+    marked: bool,
+}
+
+impl TrueFalse {
+    pub fn new() -> Self { Self { marked: false } }
+
+    pub fn flip(&mut self) {
+        if self.marked == true {
+            self.marked = false;
+        } else {
+            self.marked = true;
+        }
+    }
+
+    pub fn unmark(&mut self) { self.marked = false; }
+
+    pub fn get_marked(&self) -> bool {
+        self.marked.clone()
+    }
+
+}
+
 pub struct SpinNode {
     spin: QuantumSpin,
     pos: Array1<f64>,
-    coords: Array1<f64>,
-    pub neighbors: RwLock<Vec<usize>>, 
+    coords: Array1<f64>, // included for plotting purposes
+    pub neighbors: RwLock<Vec<usize>>,
+    pub marked: RwLock<TrueFalse>,
 }
 
 impl SpinNode {
@@ -16,6 +40,7 @@ impl SpinNode {
             pos,
             coords,
             neighbors,
+            marked: RwLock::new(TrueFalse::new()),
         }
     }
 
@@ -25,6 +50,7 @@ impl SpinNode {
             pos: Array1::<f64>::zeros(2),
             coords: Array1::<f64>::zeros(2),
             neighbors: RwLock::new(vec![]),
+            marked: RwLock::new(TrueFalse::new()),
             } 
     }
 

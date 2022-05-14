@@ -8,7 +8,7 @@ use std::f64::consts;
 use crossbeam_channel::Sender;
 use rand::thread_rng;
 use rand::Rng;
-use std::sync::{RwLock, Mutex, Arc};
+use std::sync::{RwLock, Arc};
 use crossbeam_channel::Receiver;
 use executors::parker::SmallThreadData;
 use ndarray::prelude::*;
@@ -18,8 +18,8 @@ use crossbeam_channel::{bounded, unbounded};
 use executors::crossbeam_workstealing_pool;
 use executors::parker::StaticParker;
 use crate::atomistic_simulation::crossbeam_workstealing_pool::ThreadPool;
-use crate::DividendRemainder;
-use crate::lattice_structure::lattice;
+use crate::dividend_remainder;
+use crate::lattice_structure::Lattice;
 use crate::lat_node::SpinNode;
 
 fn indexmod(index: usize, modnum: usize, x_size: usize, y_size: usize, sym_type: SymmetryType) -> Option<usize> {
@@ -107,13 +107,13 @@ pub enum SignalType {
 }
 
 pub struct Driver {
-    internal_lattice: lattice,
-    basis: RwLock<Array2<f64>>,
+    internal_lattice: Lattice,
+    basis: RwLock<Array2<f64>>, // could be used for visual plotting purposes
     x_size: usize,
     y_size: usize,
     total_nodes: usize,
     sym_type: SymmetryType,
-    J: f64,
+    exchange_constant: f64,
     num_threads: usize,
     div: usize,
     rem: usize,
@@ -126,7 +126,6 @@ pub struct Driver {
     tx_go_psum: Sender<SignalType>,
     rx_go_psum: Receiver<SignalType>,
     flip_index_vector: Arc<RwLock<Vec<usize>>>,
-    process_index_vector: Arc<RwLock<Vec<usize>>>,
     tx_go_cluster: Sender<(SignalType, f64)>,
     rx_go_cluster: Receiver<(SignalType, f64)>,
     tx_done_cluster: Sender<usize>,
@@ -136,11 +135,11 @@ pub struct Driver {
 }
 
 impl Driver {
-    pub fn new(J: f64, x_size: usize, y_size: usize, sym_type: SymmetryType, inner_basis: Array2<f64>) -> Self { 
+    pub fn new(exchange_constant: f64, x_size: usize, y_size: usize, sym_type: SymmetryType, inner_basis: Array2<f64>) -> Self { 
         assert!(x_size > 0, "size must be greater than zero!");
         assert!(y_size > 0, "size must be greater than zero!");
         let cpu_num = num_cpus::get();
-        let (div, rem) = DividendRemainder(x_size*y_size, cpu_num);
+        let (div, rem) = dividend_remainder(x_size*y_size, cpu_num);
         let mut cur_coord: Box<Array1<f64>>;
         let mut rng = thread_rng();
         let mut give_map: Vec<SpinNode> = vec![];
@@ -356,13 +355,13 @@ impl Driver {
         let (tx_cluster_queue, rx_cluster_queue) = unbounded();
         let (tx_done_cluster, rx_done_cluster) = bounded(cpu_num);
         Self {
-            internal_lattice: lattice::new(give_map),
+            internal_lattice: Lattice::new(give_map),
             basis: RwLock::new(inner_basis),
             x_size,
             y_size,
             total_nodes: x_size * y_size,
             sym_type,
-            J,
+            exchange_constant,
             num_threads: cpu_num,
             div,
             rem,
@@ -375,7 +374,6 @@ impl Driver {
             rx_psum,
             rx_go_psum,
             flip_index_vector: Arc::new(RwLock::new(vec![])),
-            process_index_vector: Arc::new(RwLock::new(vec![])),
             tx_go_cluster,
             rx_go_cluster,
             tx_done_cluster,
@@ -395,6 +393,7 @@ impl Driver {
                 let shared_data = self.internal_lattice.internal_vector.clone();
                 let tx_psum = self.tx_psum.clone();
                 let rx_go_psum = self.rx_go_psum.clone();
+                let wolff_run = self.cluster_threads_started.clone();
                 let range: std::ops::Range<usize>;
                 if i != n_jobs - 1 {
                     range = (i * self.div)..((i+1) * self.div);
@@ -406,7 +405,7 @@ impl Driver {
 
                 self.mag_pool.execute(move || {
 
-                    'outer : loop {
+                    loop {
                         let mut psum = 0.;
                         if let SignalType::SigStart = rx_go_psum.recv().unwrap() {
                             if let Ok(shared_vector) = shared_data.read().as_deref() {
@@ -414,6 +413,10 @@ impl Driver {
                                     // SAFETY: bounds are explicitly known when range is generated
                                     // and garuntees a valid return.
                                     unsafe {
+                                        if wolff_run {
+                                            let mut write_lock = shared_vector.get_unchecked(index).marked.write().unwrap();
+                                            write_lock.unmark();
+                                        }
                                         psum += shared_vector.get_unchecked(index).get_spin();
                                     }
                                 }
@@ -439,7 +442,6 @@ impl Driver {
             // let (finished_tx, finished_rx) = channel();
             for i in 0..n_jobs {
                 println!("starting cluster thread {i}");
-                let shared_processed_vec = self.process_index_vector.clone();
                 let shared_flip_vec = self.flip_index_vector.clone();
                 let shared_data = self.internal_lattice.internal_vector.clone();
                 let rx_go_cluster = self.rx_go_cluster.clone();
@@ -452,34 +454,29 @@ impl Driver {
                         let sent_signal = rx_go_cluster.recv().unwrap();
                         match sent_signal.0 {
                             SignalType::SigStart => {
-                                // println!("Thread received go signal");
-                                'inner : loop {
+                                loop {
                                     if let Ok(shared_vector) = shared_data.read().as_deref() {
                                         // pop a value from the work queue if available, else move to waiting for next go signal.
                                         if let Ok(check_index) = rx_cluster_queue.try_recv() {
                                             // SAFETY: index is checked in calling function and nodes only store valid
                                             // indicies to other nodes.
                                             unsafe {
-                                                // println!("getting read_lock");
                                                 let read_lock = shared_vector.get_unchecked(check_index.0)
                                                                                              .neighbors
                                                                                              .read()
                                                                                              .unwrap();
-                                                for i in 0..read_lock.len() {
-                                                    // println!("iterating neighbor {i}");
+                                                'nbr_loop : for i in 0..read_lock.len() {
                                                     let nbr_index = *read_lock.get_unchecked(i);
                                                     let nbr_spin = shared_vector.get_unchecked(nbr_index).get_spin();
+                                                    let mut marked_lock = shared_vector.get_unchecked(nbr_index).marked.write().unwrap();
                                                     if nbr_spin == check_index.1 {
-                                                        // println!("Spins were the same");
-                                                        let read_lock_shared_flip_vec = shared_flip_vec.read().unwrap();
-                                                        if read_lock_shared_flip_vec.contains(&nbr_index) {
-                                                            // println!("{} was in read_lock_shared_flip_vec", &nbr_index);
-                                                            continue 'inner
-                                                        } else
+                                                        if marked_lock.get_marked() == true {
+                                                            continue 'nbr_loop
+                                                        }
+                                                        marked_lock.flip();
+                                                        drop(marked_lock);
                                                         if rng.gen_range(0_f64..1_f64) < sent_signal.1 {
-                                                            drop(read_lock_shared_flip_vec);
                                                             let mut write_lock = shared_flip_vec.write().unwrap();
-                                                            // println!("pushing {} to flip channel", nbr_index);
                                                             write_lock.push(nbr_index);
                                                             tx_cluster_queue.send((nbr_index, nbr_spin)).unwrap();
                                                         }
@@ -630,16 +627,13 @@ impl Driver {
         println!("The initial energy is {}", energy);
         let mut energy_vec: Vec<f64> = vec![];
         
-        // stfu rust no one cares about your idiomatic naming conventions.
-        // I will continue to name these with a capital CammelCaseYouShmuckLol
-        // cuz #physics.
-        let mut Ms: Vec<f64> = vec![magnitization, magnitization.powf(2.)];
-        let mut Es: Vec<f64> = vec![energy, energy.powf(2.)];
+        let mut ms: Vec<f64> = vec![magnitization, magnitization.powf(2.)];
+        let mut es: Vec<f64> = vec![energy, energy.powf(2.)];
 
-        let mut M: Vec<f64> = vec![];
-        let mut E: Vec<f64> = vec![];
-        let mut C: Vec<f64> = vec![];
-        let mut X: Vec<f64> = vec![];
+        let mut m_vec: Vec<f64> = vec![];
+        let mut e_vec: Vec<f64> = vec![];
+        let mut c_vec: Vec<f64> = vec![];
+        let mut x_vec: Vec<f64> = vec![];
         let n1 = (self.total_nodes as f64).powf(2.)*(times as f64);
         let n2 = (self.total_nodes as f64).powf(2.)*(times as f64).powf(2.);
         
@@ -661,15 +655,15 @@ impl Driver {
                     panic!("invalid option! expected 0 or 1, got {}", iteration_scheme);
                 }
                 let cur = self.get_magnitization();
-                Ms[0] += magnitization.abs();
-                Ms[1] += magnitization.powf(2.);
-                Es[0] += energy;
-                Es[1] += energy.powf(2.);
+                ms[0] += magnitization.abs();
+                ms[1] += magnitization.powf(2.);
+                es[0] += energy;
+                es[1] += energy.powf(2.);
                 // cur_run_sum += cur;
-                M.push(cur / self.total_nodes as f64);
-                E.push(energy / self.total_nodes as f64);  // TODO add in actual value
-                C.push(Es[1] / n1 - Es[0].powf(2.) / n2 * beta_val.powf(2.));
-                X.push(Ms[1] / n1 - Ms[0].powf(2.) / n2 * beta_val);
+                m_vec.push(cur / self.total_nodes as f64);
+                e_vec.push(energy / self.total_nodes as f64);  // TODO add in actual value
+                c_vec.push(es[1] / n1 - es[0].powf(2.) / n2 * beta_val.powf(2.));
+                x_vec.push(ms[1] / n1 - ms[0].powf(2.) / n2 * beta_val);
                 bar1.inc(1);
             }
             energy_vec.push(energy.clone());
@@ -689,7 +683,7 @@ impl Driver {
             },
         };
         // start writing data
-        for item in M.into_iter() {
+        for item in m_vec.into_iter() {
             let write_str = format!("{}\n", item);
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
@@ -710,7 +704,7 @@ impl Driver {
                 file // forward file to outer scope
             },
         };
-        for item in E.into_iter() {
+        for item in e_vec.into_iter() {
             let write_str = format!("{}\n", item);
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
@@ -731,7 +725,7 @@ impl Driver {
                 file // forward file to outer scope
             },
         };
-        for item in X.into_iter() {
+        for item in x_vec.into_iter() {
             let write_str = format!("{}\n", item);
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
@@ -749,11 +743,10 @@ impl Driver {
         let mut file = match File::create(&path) {
             Err(why) => panic!("couldn't create {}: {}", display, why),
             Ok(file) => {
-                println!("Created files sucessfully, now writing data, please wait...");
                 file // forward file to outer scope
             },
         };
-        for item in C.into_iter() {
+        for item in c_vec.into_iter() {
             let write_str = format!("{}\n", item);
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
@@ -775,14 +768,14 @@ impl Driver {
         // the Wolff Algorithm.
         //
         // if the required threads are not alive already, launch them.
-        let balcond = 1. - consts::E.powf(-2.*beta*self.J);
+        let balcond = 1. - consts::E.powf(-2.*beta*self.exchange_constant);
         // println!("{balcond}");
         let mut rngx = thread_rng();
         let mut rngy = thread_rng();
         let mut rng_flip = thread_rng();
-        let mut x_y = 0;
-        let mut target_spin = 0.;
-        let mut dE = 0.;
+        let mut x_y: usize;
+        let mut target_spin: f64;
+        let mut delta_energy: f64 = 0.;
         // let (tx_cluster, rx_cluster) = unbounded();
 
         // pick random point
@@ -836,8 +829,8 @@ impl Driver {
             // while the flip queue is not empty, process nodes
             if let Some(cur_flip_index) = write_lock_flip_index_vector.pop() {
                 if rng_flip.gen_range(0_f64..1_f64) < balcond {
-                    let nbr_E = self.get_neighbors_spin_sum(cur_flip_index);
-                    dE += 2.*target_spin*nbr_E;
+                    let nbr_energy = self.get_neighbors_spin_sum(cur_flip_index);
+                    delta_energy += 2.*target_spin*nbr_energy;
                     self.flip_node_at(cur_flip_index);
                 }
             } else {
@@ -845,15 +838,15 @@ impl Driver {
             }
         }
         drop(write_lock_flip_index_vector);
-        return energy + dE;
+        return energy + delta_energy;
     }
 
     fn metropolis_iter(&mut self, beta: &f64, energy: f64) -> f64 {
         let mut rngx = thread_rng();
         let mut rngy = thread_rng();
         let mut rng_flip = thread_rng();
-        let mut x_y = 0;
-        let mut target_spin = 0.;
+        let mut x_y: usize;
+        let mut target_spin: f64;
         // Evolves the lattice by one iteration.
         'node_selection : loop {
             x_y = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
@@ -863,40 +856,39 @@ impl Driver {
             else { continue 'node_selection; }
         }
 
-        let mut dE: f64 = 0.;
-        let mut nbr_E: f64 = 0.;
+        let mut delta_energy: f64;
         // calculate the sum of energy of the neighbors
-        nbr_E = self.get_neighbors_spin_sum(x_y);
-        dE = 2.*target_spin*nbr_E;
-        if dE <= 0. {
+        let nbr_energy = self.get_neighbors_spin_sum(x_y);
+        delta_energy = 2.*target_spin*nbr_energy;
+        if delta_energy <= 0. {
             self.flip_node_at(x_y);
             // dE = 2.*target_spin*nbr_E;
         }
-        else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.J*dE) {
+        else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy) {
             self.flip_node_at(x_y);
             // dE = 2.*target_spin*nbr_E;
         }
         else {
-            dE = 0.;
+            delta_energy = 0.;
         }
 
-        return energy + dE;
+        return energy + delta_energy;
     }
 
     fn get_neighbors_spin_sum(&self, x_y: usize) -> f64 {
-        let mut nbr_E = 0.;
+        let mut nbr_energy = 0.;
         if let Ok(value) = self.internal_lattice.internal_vector.read() {
             if let Some(node) = value.get(x_y) {
                 let read_lock_nbrs = node.neighbors.read().unwrap();
                 for i in 0..read_lock_nbrs.len() {
                     // SAFETY: bounds checked in random node selection, garaunteed valid return
                     unsafe {
-                        nbr_E += self.get_spin_at(*read_lock_nbrs.get_unchecked(i));
+                        nbr_energy += self.get_spin_at(*read_lock_nbrs.get_unchecked(i));
                     }
                 }
             }
         }
-        nbr_E
+        nbr_energy
     }
 }
     
