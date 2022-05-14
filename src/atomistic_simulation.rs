@@ -15,7 +15,7 @@ use executors::parker::SmallThreadData;
 use ndarray::prelude::*;
 use executors::Executor;
 use crossbeam_utils::thread;
-use crossbeam_channel::bounded;
+use crossbeam_channel::{bounded, unbounded};
 use executors::crossbeam_workstealing_pool;
 use executors::parker::StaticParker;
 use crate::atomistic_simulation::crossbeam_workstealing_pool::ThreadPool;
@@ -51,20 +51,43 @@ fn indexmod(index: usize, modnum: usize, x_size: usize, y_size: usize, sym_type:
             }
         },
         SymmetryType::C6V => {
+            let i = (index / y_size) as usize;
+            let j = index - i * y_size;
             if modnum == 0 {
-                if index + 1 < x_size*y_size {
-                    return Some(index+1);
-                } else { return None; }
+                if j > 0 {
+                    // if the y index is greater than 0, we can add the -y node
+                    return Some(index - 1);
+                }
+                
             } else
             if modnum == 1 {
-                if index + x_size < x_size*y_size {
-                    return Some(index + x_size);
-                } else { return None; }
+                if (j + 2) < y_size {
+                    // if the y index is 2 less than the  
+                    return Some(index + 1);
+                }
             } else
             if modnum == 2 {
-                if index > x_size && index < x_size*y_size {
-                    return Some(index - x_size);
-                } else { return None; }
+                if i % 2 == 0 {
+                    // when we are on an even increment the +x direction
+                    if (j % 2 == 0) && (index >= y_size) {
+                       // if the y index is even, then its neighbor is in the -x direction
+                        return Some(index - y_size);
+                    } else
+                    if (j % 2 == 1) && ((index + y_size + 1) <= x_size*y_size) {
+                        // if the y index is odd, then its neighbor is in the -x direction
+                        return Some(index + y_size);
+                    }
+                } else {
+                    // when we are on an odd increment the +x direction
+                    if (j % 2 == 0) && ((index + y_size + 1) <= x_size*y_size) {
+                        // if the y index is even, then its neighbor is in the -x direction
+                        return Some(index + y_size);
+                    } else
+                    if (j % 2 == 1) && (index >= y_size) {
+                        // if the y index is odd, then its neighbor is in the -x direction
+                        return Some(index - y_size);
+                    }
+                }
             }
         },
     }
@@ -196,7 +219,7 @@ impl Driver {
                 //                                              \_/
                 //                                              / \
                 //
-                // When this is repeated, a lattice is created and we get (real end product looks better than comment):
+                // When this scheme is repeated, a lattice is created and we get (real end product looks better than comment):
                 //
                 //                                         \_/ \_/ \_/ \
                 //                                         / \_/ \_/ \_/
@@ -205,13 +228,49 @@ impl Driver {
                 //                                         \_/ \_/ \_/ \
                 //                                         / \_/ \_/ \_/
                 //
+                // Labeling of the nodes increments in the y direction by 1, starting from 0.
+
                 let cur_basis = inner_basis.clone();
                 let b1 = array![cur_basis[(0,0)], cur_basis[(0,1)]];
                 let b2 = array![cur_basis[(1,0)], cur_basis[(1,1)]];
                 let b3 = array![-b2[0], b2[1]];
                 let mut cur_coord: Box<Array1<f64>> = Box::new(array![0., 0.]);
+
                 for i in 0..x_size {
                     for j in 0..y_size {
+                        let mut neighbors = vec![];
+                        let cur_index = j + i * y_size;
+                        // add the + and - y neighbors to the neighbors vector.
+                        // this needs to be checked for all nodes.
+                        if j > 0 {
+                            // if the y index is greater than 0, we can add the -y node
+                            neighbors.push(cur_index - 1);
+                        }
+                        if (j + 2) < y_size {
+                            // if the y index is 2 less than the  
+                            neighbors.push(cur_index + 1);
+                        }
+                        if i % 2 == 0 {
+                            // when we are on an even increment the +x direction
+                            if (j % 2 == 0) && (cur_index >= y_size) {
+                               // if the y index is even, then its neighbor is in the -x direction
+                               neighbors.push(cur_index - y_size);
+                            } else
+                            if (j % 2 == 1) && ((cur_index + y_size + 1) <= x_size*y_size) {
+                                // if the y index is odd, then its neighbor is in the -x direction
+                                neighbors.push(cur_index + y_size);
+                            }
+                        } else {
+                            // when we are on an odd increment the +x direction
+                            if (j % 2 == 0) && ((cur_index + y_size + 1) <= x_size*y_size) {
+                                // if the y index is even, then its neighbor is in the -x direction
+                                neighbors.push(cur_index + y_size);
+                            } else
+                            if (j % 2 == 1) && (cur_index >= y_size) {
+                                // if the y index is odd, then its neighbor is in the -x direction
+                                neighbors.push(cur_index - y_size);
+                            }
+                        }
                         // randomization conditions would go here or somewhere near here.
                         let genval: f64 = rng.gen();
                         if genval >= 0.5 {
@@ -220,14 +279,14 @@ impl Driver {
                                     0.5,
                                     array![i as f64, j as f64],
                                     *cur_coord.clone(),
-                                    RwLock::new(vec![])));
+                                    RwLock::new(neighbors)));
                         } else {
                             give_map.push(
                                 SpinNode::cons_node(
                                     -0.5,
                                     array![i as f64, j as f64],
                                     *cur_coord.clone(),
-                                    RwLock::new(vec![])));
+                                    RwLock::new(neighbors)));
                         }
                         if i % 2 == 0 {
                             // when we are on an even increment of b2
@@ -266,17 +325,18 @@ impl Driver {
                 //                                    |
                 //                                    V
                 //
-                let cur_basis = inner_basis.clone();
-                let b1 = array![cur_basis[(0,0)], cur_basis[(0,1)]];
-                let b2 = array![cur_basis[(1,0)], cur_basis[(1,1)]];
-                let b3 = array![-b2[0], b2[1]];
-                let mut cur_coord = array![0., 0.];
-                for i in 0..x_size {
-                    for j in 0..y_size {
-                        assert_eq!(i, i);  // TODO
-                        assert_eq!(j, j);
-                    }
-                }
+
+                // let cur_basis = inner_basis.clone();
+                // let b1 = array![cur_basis[(0,0)], cur_basis[(0,1)]];
+                // let b2 = array![cur_basis[(1,0)], cur_basis[(1,1)]];
+                // let b3 = array![-b2[0], b2[1]];
+                // let mut cur_coord = array![0., 0.];
+                // for i in 0..x_size {
+                //     for j in 0..y_size {
+                //         assert_eq!(i, i);  // TODO
+                //         assert_eq!(j, j);
+                //     }
+                // }
             },
         }
         println!("Done!");
@@ -394,6 +454,8 @@ impl Driver {
         }
         self.rx_psum.iter().take(self.num_threads).fold(0., |a, b| a + b)
     }
+
+    fn 
     
     fn energy_worker<'a>(&'a self, range: Range<usize>) -> f64 {
         let thread_return_value = thread::scope(|scope| {
@@ -577,57 +639,55 @@ impl Driver {
         println!("Sucessfully wrote file! Exiting...");
     }
 
-    // fn wolff_iter(&mut self, beta: &f64, energy: f64) -> f64 {
-    //     //
-    //     // Purpose
-    //     // -------
-    //     // Mutates the self.LinkedLat lattice of spins by one Iteration of
-    //     // the Wolff Algorithm.
-    //     //
-    //     // if the required threads are not alive already, launch them.
-    //     let balcond = 1. - consts::E.powf(-2.*beta);
-    //     let mut rngx = thread_rng();
-    //     let mut rngy = thread_rng();
-    //     let mut rng_flip = thread_rng();
-    //     let mut x_y = 0;
-    //     let mut target_spin = 0.;
-    //     // pick random point
-    //     'node_selection : loop {
-    //         x_y = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
-    //         target_spin = self.get_spin_at(x_y);
-    //         // println!("{}", &x_y);
-    //         if target_spin != 0. { break 'node_selection; }
-    //         else { continue 'node_selection; }
-    //     }
+    fn wolff_iter(&mut self, beta: &f64, energy: f64) -> f64 {
+        //
+        // Purpose
+        // -------
+        // Mutates the self.LinkedLat lattice of spins by one Iteration of
+        // the Wolff Algorithm.
+        //
+        // if the required threads are not alive already, launch them.
+        let balcond = 1. - consts::E.powf(-2.*beta);
+        let mut rngx = thread_rng();
+        let mut rngy = thread_rng();
+        let mut rng_flip = thread_rng();
+        let mut x_y = 0;
+        let mut target_spin = 0.;
+        let dE = 0.;
+        let (tx_cluster, rx_cluster) = unbounded();
 
-    //     // push the random node to the work queue
-    //     for nbr in rand_node:
-    //         if nbr.get_spin() == rand_node.get_spin():
-    //             self.work_queue_path.put(nbr.get_index())
-    //             nbr.unmark_node()
-    //     // wait for cluster to be generated
-    //     self.GetCluster(balcond)
-    //     try:
-    //         // evaluate energy change path integral (discrete sum? lol)
-    //         dE = float64(0)
-    //         cur = self.LinkedLat[self.cluster_queue.get(block=False)]
-    //         S_i = cur.get_spin()
-    //         while True:
-    //             if random.random() < balcond:
-    //                 nbr_sum = float64(0)
-    //                 _dE = 2*S_i*nbr_sum*self.J
-    //                 for nbr in cur:
-    //                     nbr_sum += nbr.get_spin()
-    //                 cur.flip_spin()
-    //                 dE += _dE
-    //             cur = self.LinkedLat[self.cluster_queue.get(block=False)]
-    //     except queue.Empty:
-    //         // exit while loop when queue is empty and end the current
-    //         // Iteration
-    //         pass
+        // pick random point
+        'node_selection : loop {
+            x_y = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
+            target_spin = self.get_spin_at(x_y);
+            // println!("{}", &x_y);
+            if target_spin != 0. { break 'node_selection; }
+            else { continue 'node_selection; }
+        }
 
-    //     return energy + dE;
-    // }
+        // push the random node neighbors index to the work queue
+        if let Ok(value) = self.internal_lattice.internal_vector.read() {
+            if let Some(node) = value.get(x_y) {
+                let read_lock_nbrs = node.neighbors.read().unwrap();
+                for i in 0..read_lock_nbrs.len() {
+                    // SAFETY: bounds checked in Driver::new, garaunteed valid return.
+                    unsafe {
+                        let nbr_index = *read_lock_nbrs.get_unchecked(i);
+                        if self.get_spin_at(nbr_index) == target_spin {
+                            // if the index is the same as the randomly picked node, add it to the
+                            // queue.
+                            tx_cluster.send(nbr_index);
+                        }
+                    }
+                }
+            }
+        }
+        // spin up threads for generating a cluster flip.
+
+        //TODO
+
+        return energy + dE;
+    }
 
     fn metropolis_iter(&mut self, beta: &f64, energy: f64) -> f64 {
         let mut rngx = thread_rng();
@@ -646,41 +706,38 @@ impl Driver {
 
         let mut dE: f64 = 0.;
         let mut nbr_E: f64 = 0.;
-        match self.sym_type {
-            SymmetryType::C4V => {
-                // calculate the sum of energy of the neighbors
-                if let Ok(value) = self.internal_lattice.internal_vector.read() {
-                    if let Some(node) = value.get(x_y) {
-                        let nbrs_thing = node.neighbors.read().unwrap();
-                        for i in 0..nbrs_thing.len() {
-                            // SAFETY: bounds checked in random node selection, garaunteed valid return
-                            unsafe {
-                                nbr_E += self.get_spin_at(*nbrs_thing.get_unchecked(i));
-                            }
-                        }
+        // calculate the sum of energy of the neighbors
+        nbr_E = self.get_neighbors_spin_sum(x_y);
+        dE = 2.*target_spin*nbr_E;
+        if dE <= 0. {
+            self.flip_node_at(x_y);
+            // dE = 2.*target_spin*nbr_E;
+        }
+        else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*dE) {
+            self.flip_node_at(x_y);
+            // dE = 2.*target_spin*nbr_E;
+        }
+        else {
+            dE = 0.;
+        }
+
+        return energy + dE;
+    }
+
+    fn get_neighbors_spin_sum(&self, x_y: usize) -> f64 {
+        let mut nbr_E = 0.;
+        if let Ok(value) = self.internal_lattice.internal_vector.read() {
+            if let Some(node) = value.get(x_y) {
+                let read_lock_nbrs = node.neighbors.read().unwrap();
+                for i in 0..read_lock_nbrs.len() {
+                    // SAFETY: bounds checked in random node selection, garaunteed valid return
+                    unsafe {
+                        nbr_E += self.get_spin_at(*read_lock_nbrs.get_unchecked(i));
                     }
                 }
-                dE = 2.*target_spin*nbr_E;
-                if dE <= 0. {
-                    self.flip_node_at(x_y);
-                    // dE = 2.*target_spin*nbr_E;
-                }
-                else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*dE) {
-                    self.flip_node_at(x_y);
-                    // dE = 2.*target_spin*nbr_E;
-                }
-                else {
-                    dE = 0.;
-                }
-            }, 
-            SymmetryType::C3V => {
-
-            },
-            SymmetryType::C6V => {
-
             }
         }
-        return energy + dE;
+        nbr_E
     }
 }
     

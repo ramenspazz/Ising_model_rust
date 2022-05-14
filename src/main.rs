@@ -26,11 +26,17 @@ fn get_input_as_usize() -> usize {
 
 fn main() {
     println!("enter the x, then the y size of the system in terms of two basis vectors: ");
+    // let mut test_driver = ising_model::atomistic_simulation::Driver::new(
+    //     get_input_as_usize(),
+    //     get_input_as_usize(),
+    //     SymmetryType::C4V,
+    //     array![[1., 0.], [0., 1.]],
+    // );
     let mut test_driver = ising_model::atomistic_simulation::Driver::new(
         get_input_as_usize(),
         get_input_as_usize(),
-        SymmetryType::C4V,
-        array![[1., 0.], [0., 1.]],
+        SymmetryType::C3V,
+        array![[1., 0.], [0.5, (3 as f64).sqrt()/2.]],
     );
 
     println!("Enter the number of iterations to preform the Metropolis algorithm for: ");
