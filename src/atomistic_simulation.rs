@@ -454,8 +454,6 @@ impl Driver {
         }
         self.rx_psum.iter().take(self.num_threads).fold(0., |a, b| a + b)
     }
-
-    fn 
     
     fn energy_worker<'a>(&'a self, range: Range<usize>) -> f64 {
         let thread_return_value = thread::scope(|scope| {
