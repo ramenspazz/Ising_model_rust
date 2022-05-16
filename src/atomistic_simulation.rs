@@ -625,6 +625,9 @@ impl Driver {
         if self.magnitiztion_threads_started {
             self.magnitization_go_stop_signaler.close_channel();
         }
+        if self.energy_threads_started {
+            self.energy_go_stop_signaler.close_channel();
+        }
         if self.cluster_threads_started {
             self.cluster_go_stop_signaler.close_channel();
         }
