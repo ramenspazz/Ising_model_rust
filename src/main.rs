@@ -41,7 +41,7 @@ fn main() {
             SymmetryType::C3V,
             array![[1., 0.], [0.5, 3_f64.sqrt()/2.]],
             rand_gen.gen_range(0_f64..1_f64),
-            9.81,
+            0.5,
         );
         c3v_driver.save_state("c3v.dat");
         loop {

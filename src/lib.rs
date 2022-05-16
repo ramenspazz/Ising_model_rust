@@ -1,19 +1,18 @@
+/// Purpose
+/// -------
+/// Returns a list with the quotient and remainder of `dividend` / `divisor`.
+/// I designed this to run in exponential jumps of the power of 2 using the
+/// left bitshift operator, so it functions faster than the standard
+/// implimentation of the remainder algorithm that I have seen.
+/// Runs in Omega(log(n)), Theta(n), O(nlog(n))
+/// 
+/// Returns
+/// -------
+/// (Quotient, Remainder) : `tuple`
+/// - `tuple` containing the integer quotient and remainder of
+/// division.
 pub fn dividend_remainder(dividend: usize,
     divisor: usize) -> (usize, usize) {
-        // Purpose
-        // -------
-        // Returns a list with the quotient and remainder of `dividend` / `divisor`.
-        // I designed this to run in exponential jumps of the power of 2 using the
-        // left bitshift operator, so it functions faster than the standard
-        // implimentation of the remainder algorithm that I have seen.
-        // Runs in Omega(log(n)), Theta(n), O(nlog(n))
-        // 
-        // Returns
-        // -------
-        // [Quotient, Remainder] : `list`
-        // - ``list` containing the integer quotient and remainder of
-        // division.
-    
         // Might be necessary but for now doesnt appear to be relavant for my use
         // case. Included just incase, just uncomment and define MAX_INT and
         // MIN_INT.
@@ -119,3 +118,4 @@ pub fn get_input_as_f64(msg: Option<&str>) -> f64 {
 pub mod atomistic_simulation;
 pub mod lattice_structure;
 pub mod lat_node;
+pub mod SignalContainer;

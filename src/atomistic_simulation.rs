@@ -2,23 +2,20 @@ use std::{thread as stdth, time};
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
-use core::ops::Range;
+// use core::ops::Range;
 use indicatif::ProgressBar;
 use std::f64::consts;
-use crossbeam_channel::Sender;
 use rand::thread_rng;
 use rand::Rng;
 use std::sync::{RwLock, Arc};
-use crossbeam_channel::Receiver;
 use executors::parker::SmallThreadData;
 use ndarray::prelude::*;
 use executors::Executor;
-use crossbeam_utils::thread;
-use crossbeam_channel::{bounded, unbounded};
 use executors::crossbeam_workstealing_pool;
 use executors::parker::StaticParker;
 use crate::atomistic_simulation::crossbeam_workstealing_pool::ThreadPool;
-use crate::{dividend_remainder, get_input_as_f64};
+use crate::dividend_remainder;
+use crate::SignalContainer::*;
 use crate::lattice_structure::Lattice;
 use crate::lat_node::SpinNode;
 
@@ -99,54 +96,6 @@ pub enum SymmetryType {
     C3V,
     C4V,
     C6V,
-}
-#[derive(PartialEq)]
-#[derive(Clone)]
-pub enum SignalType {
-    SigStart,
-    SigStop,
-}
-
-#[derive(Clone)]
-pub struct SignalContainer<T> {
-    tx: Sender<T>,
-    rx: Receiver<T>,
-}
-
-impl<T> SignalContainer<T> {
-    /// Creates a channel of bounded capacity.
-    ///
-    /// This channel has a buffer that can hold at most `cap` messages at a time.
-    ///
-    /// A special case is zero-capacity channel, which cannot hold any messages. Instead, send and
-    /// receive operations must appear at the same time in order to pair up and pass the message over.
-    pub fn new(cap: usize) -> Self {
-        if cap == 0 {
-            let (tx, rx) = unbounded();
-            return Self {
-                tx,
-                rx,
-            }
-        }
-        else if cap > 0 {
-            let (tx, rx) = bounded(cap);
-            return Self {
-                tx,
-                rx,
-            }
-        }
-        panic!("Error occured!");
-    }
-    
-    pub fn close_channel(self) { drop(self.tx); }
-
-    pub fn send(&self, msg: T) -> Result<(), crossbeam_channel::SendError<T>> { self.tx.send(msg) }
-
-    pub fn recv(&self) -> Result<T, crossbeam_channel::RecvError> { self.rx.recv() }
-
-    pub fn try_recv(&self) -> Result<T, crossbeam_channel::TryRecvError> { self.rx.try_recv() }
-
-    pub fn is_full(&self) -> bool { self.rx.is_full() }
 }
 
 pub struct Driver {
@@ -684,37 +633,6 @@ impl Driver {
         energy
     }
     
-    // fn get_energy<'a>(&'a self) -> f64 {
-    //     let mut energy = 0.;
-    //     for i in 0usize..self.num_threads {
-    //         let range: std::ops::Range<usize>;
-    //             if i != self.num_threads - 1 {
-    //                 range = (i * self.div)..((i+1) * self.div - 1);
-    //             } else {
-    //                 // Get the remainder in the last thread spawned. We could smear it out amongst
-    //                 // the other threads, but this is easier for all edge cases.
-    //                 range = (i * self.div)..((i+1) * self.div + self.rem - 1);
-    //             }
-    //         energy += self.energy_worker(range);
-    //     }
-    //     return energy;
-    // }
-
-    // fn energy_worker<'a>(&'a self, range: Range<usize>) -> f64 {
-    //     let thread_return_value = thread::scope(|scope| {
-    //         let th = scope.spawn(move |_| {
-    //             let mut partial_energy = 0.;
-    //             for node_index in range {
-    //                 partial_energy += self.get_spin_at(node_index) * self.get_neighbors_spin_sum(node_index);
-    //             }
-    //             partial_energy
-    //         });
-    //         let psum = th.join().unwrap();
-    //         psum
-    //     }
-    //     ).unwrap();
-    //     return -thread_return_value;
-    // }
 
     fn save_files(&self, m_vec: Vec<f64>, e_vec: Vec<f64>, x_vec: Vec<f64>, c_vec: Vec<f64>) {
         println!("Writing data to file, 少々お待ちして下さい");
@@ -852,11 +770,11 @@ impl Driver {
             
             magnitization = initial_magnitization;
             energy = initial_energy;
-            let (mut d_energy, mut d_mag) = (0., 0.);
+            let (mut d_energy, mut d_mag);
             ms = vec![0., 0.];
             es = vec![0., 0.];
 
-            for cur_t in 0..times {
+            for _ in 0..times {
                 // preform an iteration scheme of metropolis or wolff
                 if iteration_scheme == 0 {
                     (d_energy, d_mag) = self.metropolis_iter(&beta_val);
@@ -893,29 +811,26 @@ impl Driver {
         }
     }
     
+    /// Purpose
+    /// -------
+    /// Mutates the self.LinkedLat lattice of spins by one Iteration of
+    /// the Wolff Algorithm.
+    ///
+    /// if the required threads are not alive already, launch them.
     fn wolff_iter(&mut self, beta: &f64) -> (f64, f64) {
-        //
-        // Purpose
-        // -------
-        // Mutates the self.LinkedLat lattice of spins by one Iteration of
-        // the Wolff Algorithm.
-        //
-        // if the required threads are not alive already, launch them.
-        let balcond = 1. - consts::E.powf(-2.*beta*self.exchange_constant);
-        // println!("{balcond}");
-        let mut rngx = thread_rng();
-        let mut rngy = thread_rng();
+        let balance_condition = 1. - consts::E.powf(-20.*beta*self.exchange_constant);
+        let mut rngspin = thread_rng();
         let mut target_index: usize;
         let mut target_spin: f64;
         let mut delta_energy: f64 = 0.;
         let mut delta_mag: f64 = 0.;
 
-        // pick random point
+        // select a random node
         'node_selection : loop {
-            target_index = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
+            target_index = rngspin.gen_range(0..(self.x_size*self.y_size - 1));
             target_spin = self.get_spin_at(target_index);
-            if target_spin != 0. { break 'node_selection }
-            else { continue 'node_selection }
+            if target_spin != 0. { break 'node_selection; }
+            else { continue 'node_selection; }
         }
 
         // add target node to flip list
@@ -955,7 +870,7 @@ impl Driver {
         // spin up threads for generating a cluster flip and then wait for them to finish.
         // println!("sending go signal to cluster threads");
         for _ in 0..self.num_threads {
-            self.cluster_go_stop_signaler.send((SignalType::SigStart, balcond)).unwrap();
+            self.cluster_go_stop_signaler.send((SignalType::SigStart, balance_condition)).unwrap();
         }
         // println!("waiting for threads to finish...");
         while self.cluster_done_signaler.is_full() == false {
@@ -969,11 +884,17 @@ impl Driver {
         
         // flip spins and calculate the path integral value of the change in energy dE
         let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap(); 
+        let read_lock_internal_vector = self.internal_lattice.internal_vector.read().unwrap();
         loop {
             // while the flip queue is not empty, process nodes
             if let Some(cur_flip_index) = write_lock_flip_index_vector.pop() {
-                let nbr_energy = self.get_neighbors_spin_sum(cur_flip_index);
-                delta_energy += -target_spin*nbr_energy;
+        // SAFETY: cur_flip_index will always point to a valid node
+        unsafe {let cur_target = read_lock_internal_vector.get_unchecked(cur_flip_index);
+                let cur_target_nbrs_lock = cur_target.neighbors.read().unwrap();
+                for flip_node_nbrs_index in cur_target_nbrs_lock.iter() {
+                    delta_energy += cur_target.get_spin() * self.get_neighbors_spin_sum(*flip_node_nbrs_index);
+                }}
+                delta_energy += -target_spin * self.get_neighbors_spin_sum(cur_flip_index);
                 delta_mag += -target_spin;
                 } else {
                     break
@@ -983,33 +904,42 @@ impl Driver {
             return (delta_energy, delta_mag);
     }
 
+    /// Evolves the lattice by one iteration using the metropolis-hastings scheme.
     fn metropolis_iter(&mut self, beta: &f64) -> (f64, f64) {
-        let mut rngx = thread_rng();
-        let mut rngy = thread_rng();
+        let mut rngspin = thread_rng();
         let mut rng_flip = thread_rng();
-        let mut x_y: usize;
+        let mut target_index: usize;
         let mut target_spin: f64;
-        // Evolves the lattice by one iteration.
+
+        // select a random node
         'node_selection : loop {
-            x_y = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
-            target_spin = self.get_spin_at(x_y);
+            target_index = rngspin.gen_range(0..(self.x_size*self.y_size - 1));
+            target_spin = self.get_spin_at(target_index);
             if target_spin != 0. { break 'node_selection; }
             else { continue 'node_selection; }
         }
 
-        let mut delta_energy: f64;
+        let mut delta_energy: f64 = 0.;
         let delta_mag: f64;
-        // calculate the sum of energy of the neighbors
-        let nbr_energy = self.get_neighbors_spin_sum(x_y);
-        delta_energy = -target_spin*nbr_energy;
-        if delta_energy > 0. && rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy) {
-            self.flip_node_at(x_y);
-            // dE = 2.*target_spin*nbr_E;
+        // calculate dE of the proposed spin flip at x_y
+        let read_lock_internal_vector = self.internal_lattice.internal_vector.read().unwrap();
+        // SAFETY: x_y was checked already to be a valid node
+        unsafe {let cur_target = read_lock_internal_vector.get_unchecked(target_index);
+            let cur_target_nbrs_lock = cur_target.neighbors.read().unwrap();
+            for flip_node_nbrs_index in cur_target_nbrs_lock.iter() {
+                delta_energy += cur_target.get_spin() * self.get_neighbors_spin_sum(*flip_node_nbrs_index);
+            }
+            delta_energy += -target_spin * self.get_neighbors_spin_sum(target_index);
+        }
+        drop(read_lock_internal_vector);
+
+                
+        if delta_energy > 0. && (rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy)) {
+            self.flip_node_at(target_index);
             delta_mag = -target_spin;
         }
         else if delta_energy <= 0. {
-            self.flip_node_at(x_y);
-            // dE = 2.*target_spin*nbr_E;
+            self.flip_node_at(target_index);
             delta_mag = -target_spin;
         }
         else {
