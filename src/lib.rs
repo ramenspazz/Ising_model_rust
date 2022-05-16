@@ -54,6 +54,68 @@ pub fn dividend_remainder(dividend: usize,
         }
     }
 
+// https://play.rust-lang.org/?gist=9ca489c1de25feb2f09a1770e40b62b1&version=stable
+pub fn is_only_numbers(input: &str) -> bool {
+    let chars_are_numeric: Vec<bool> = input.chars().map(|c|c.is_numeric()).collect();
+    !chars_are_numeric.contains(&false)
+}
+
+pub fn get_input_as_usize(msg: Option<&str>) -> usize {
+    loop {
+        if msg != None {
+            println!("{}", msg.unwrap());
+        }
+        let mut usrin = String::from("");
+
+        std::io::stdin()
+            .read_line(&mut usrin)
+            .expect("Failed to read line");
+
+        if is_only_numbers(&usrin) { 
+            println!("Invalid input!");
+            continue
+        }
+        else if usrin.contains(".") {
+            println!("Invalid input!");
+            continue
+        }
+
+        match usrin.trim().parse::<usize>() {
+            Ok(num) => return num,
+            Err(_) => {
+                println!("Invalid input!");
+                continue
+            },
+        };
+    }
+}
+
+pub fn get_input_as_f64(msg: Option<&str>) -> f64 {
+    loop {
+        if msg != None {
+            println!("{}", msg.unwrap());
+        }
+        let mut usrin = String::from("");
+
+        std::io::stdin()
+            .read_line(&mut usrin)
+            .expect("Failed to read line");
+
+        if is_only_numbers(&usrin) { 
+            println!("Invalid input!");
+            continue
+        }
+
+        match usrin.trim().parse::<f64>() {
+            Ok(num) => return num,
+            Err(_) => {
+                println!("Invalid input!");
+                continue
+            },
+        };
+    }
+}    
+
 pub mod atomistic_simulation;
 pub mod lattice_structure;
 pub mod lat_node;

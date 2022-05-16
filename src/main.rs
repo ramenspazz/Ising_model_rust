@@ -1,70 +1,9 @@
 extern crate rand;
-use std::io;
-use ising_model;
 use ising_model::atomistic_simulation::SymmetryType;
+use ising_model::*;
 use ndarray::prelude::*;
+use rand::{thread_rng, Rng};
 
-// https://play.rust-lang.org/?gist=9ca489c1de25feb2f09a1770e40b62b1&version=stable
-fn is_only_numbers(input: &str) -> bool {
-    let chars_are_numeric: Vec<bool> = input.chars().map(|c|c.is_numeric()).collect();
-    !chars_are_numeric.contains(&false)
-}
-
-fn get_input_as_usize(msg: Option<&str>) -> usize {
-    loop {
-        if msg != None {
-            println!("{}", msg.unwrap());
-        }
-        let mut usrin = String::from("");
-
-        io::stdin()
-            .read_line(&mut usrin)
-            .expect("Failed to read line");
-
-        if is_only_numbers(&usrin) { 
-            println!("Invalid input!");
-            continue
-        }
-        else if usrin.contains(".") {
-            println!("Invalid input!");
-            continue
-        }
-
-        match usrin.trim().parse::<usize>() {
-            Ok(num) => return num,
-            Err(_) => {
-                println!("Invalid input!");
-                continue
-            },
-        };
-    }
-}
-
-fn get_input_as_f64(msg: Option<&str>) -> f64 {
-    loop {
-        if msg != None {
-            println!("{}", msg.unwrap());
-        }
-        let mut usrin = String::from("");
-
-        io::stdin()
-            .read_line(&mut usrin)
-            .expect("Failed to read line");
-
-        if is_only_numbers(&usrin) { 
-            println!("Invalid input!");
-            continue
-        }
-
-        match usrin.trim().parse::<f64>() {
-            Ok(num) => return num,
-            Err(_) => {
-                println!("Invalid input!");
-                continue
-            },
-        };
-    }
-}
 
 fn main() {
     println!("Enter the number of iterations to evolve the system for: ");
@@ -92,7 +31,7 @@ fn main() {
             continue
         }
     }
-
+    let mut rand_gen = thread_rng();
     println!("Enter the J spin coupling value, x, then the y size of the system in terms of two basis vectors: ");
     if usrin == 0 {
         let mut c3v_driver = ising_model::atomistic_simulation::Driver::new(
@@ -100,8 +39,11 @@ fn main() {
             get_input_as_usize(Some("Enter x size: ")),
             get_input_as_usize(Some("Enter y size: ")),
             SymmetryType::C3V,
-            array![[1., 0.], [0.5, (3 as f64).sqrt()/2.]],
+            array![[1., 0.], [0.5, 3_f64.sqrt()/2.]],
+            rand_gen.gen_range(0_f64..1_f64),
+            9.81,
         );
+        c3v_driver.save_state("c3v.dat");
         loop {
             usrin = get_input_as_usize(Some("Enter 0 to run the Metropolis-Hastings algorithm, or 1 to run the Wolff algorithm: "));
             if usrin == 0 || usrin == 1 {
@@ -120,7 +62,10 @@ fn main() {
             get_input_as_usize(Some("Enter y size: ")),
             SymmetryType::C4V,
             array![[1., 0.], [0., 1.]],
+            rand_gen.gen_range(0_f64..1_f64),
+            0.5,
         );
+        c4v_driver.save_state("c4v.dat");
         loop {
             usrin = get_input_as_usize(Some("Enter 0 to run the Metropolis-Hastings algorithm, or 1 to run the Wolff algorithm: "));
             if usrin == 0 || usrin == 1 {

@@ -22,6 +22,10 @@ impl TrueFalse {
         self.marked.clone()
     }
 
+    pub fn mark(&mut self) {
+        self.marked = true;
+    }
+
 }
 
 pub struct SpinNode {
@@ -70,6 +74,10 @@ impl SpinNode {
             Some(spin) => spin,
             None => 0.,
         }
+    }
+
+    pub fn set_spin(&mut self, spin: f64) {
+        self.spin.set_spin(spin);
     }
 
     /// Flip the spin node's spin.

@@ -18,7 +18,7 @@ use crossbeam_channel::{bounded, unbounded};
 use executors::crossbeam_workstealing_pool;
 use executors::parker::StaticParker;
 use crate::atomistic_simulation::crossbeam_workstealing_pool::ThreadPool;
-use crate::dividend_remainder;
+use crate::{dividend_remainder, get_input_as_f64};
 use crate::lattice_structure::Lattice;
 use crate::lat_node::SpinNode;
 
@@ -101,9 +101,52 @@ pub enum SymmetryType {
     C6V,
 }
 #[derive(PartialEq)]
+#[derive(Clone)]
 pub enum SignalType {
     SigStart,
     SigStop,
+}
+
+#[derive(Clone)]
+pub struct SignalContainer<T> {
+    tx: Sender<T>,
+    rx: Receiver<T>,
+}
+
+impl<T> SignalContainer<T> {
+    /// Creates a channel of bounded capacity.
+    ///
+    /// This channel has a buffer that can hold at most `cap` messages at a time.
+    ///
+    /// A special case is zero-capacity channel, which cannot hold any messages. Instead, send and
+    /// receive operations must appear at the same time in order to pair up and pass the message over.
+    pub fn new(cap: usize) -> Self {
+        if cap == 0 {
+            let (tx, rx) = unbounded();
+            return Self {
+                tx,
+                rx,
+            }
+        }
+        else if cap > 0 {
+            let (tx, rx) = bounded(cap);
+            return Self {
+                tx,
+                rx,
+            }
+        }
+        panic!("Error occured!");
+    }
+    
+    pub fn close_channel(self) { drop(self.tx); }
+
+    pub fn send(&self, msg: T) -> Result<(), crossbeam_channel::SendError<T>> { self.tx.send(msg) }
+
+    pub fn recv(&self) -> Result<T, crossbeam_channel::RecvError> { self.rx.recv() }
+
+    pub fn try_recv(&self) -> Result<T, crossbeam_channel::TryRecvError> { self.rx.try_recv() }
+
+    pub fn is_full(&self) -> bool { self.rx.is_full() }
 }
 
 pub struct Driver {
@@ -119,23 +162,22 @@ pub struct Driver {
     rem: usize,
     magnitiztion_threads_started: bool,
     cluster_threads_started: bool,
+    energy_threads_started: bool,
     mag_pool: ThreadPool<StaticParker<SmallThreadData>>,
+    energy_pool: ThreadPool<StaticParker<SmallThreadData>>,
     cluster_pool: ThreadPool<StaticParker<SmallThreadData>>,
-    tx_psum: Sender<f64>,
-    rx_psum: Receiver<f64>,
-    tx_go_psum: Sender<SignalType>,
-    rx_go_psum: Receiver<SignalType>,
+    magnitization_psum_signaler: SignalContainer<f64>,
+    magnitization_go_stop_signaler: SignalContainer<SignalType>,
+    energy_psum_signaler: SignalContainer<f64>,
+    energy_go_stop_signaler: SignalContainer<SignalType>,
+    cluster_go_stop_signaler: SignalContainer<(SignalType, f64)>,
+    cluster_done_signaler: SignalContainer<usize>,
+    cluster_queue_signaler: SignalContainer<(usize, f64)>,
     flip_index_vector: Arc<RwLock<Vec<usize>>>,
-    tx_go_cluster: Sender<(SignalType, f64)>,
-    rx_go_cluster: Receiver<(SignalType, f64)>,
-    tx_done_cluster: Sender<usize>,
-    rx_done_cluster: Receiver<usize>,
-    tx_cluster_queue: Sender<(usize, f64)>,
-    rx_cluster_queue: Receiver<(usize, f64)>,
 }
 
 impl Driver {
-    pub fn new(exchange_constant: f64, x_size: usize, y_size: usize, sym_type: SymmetryType, inner_basis: Array2<f64>) -> Self { 
+    pub fn new(exchange_constant: f64, x_size: usize, y_size: usize, sym_type: SymmetryType, inner_basis: Array2<f64>, spin_up_chance: f64, spin_unit: f64) -> Self { 
         assert!(x_size > 0, "size must be greater than zero!");
         assert!(y_size > 0, "size must be greater than zero!");
         let cpu_num = num_cpus::get();
@@ -152,7 +194,7 @@ impl Driver {
                 // itteraton.
                 for i in 0..x_size {
                     for j in 0..y_size {
-                        let genval: f64 = rng.gen();
+                        let genval: f64 = rng.gen_range(0_f64..1_f64);
                         // randomization conditions would go here or somewhere near here.
                         cur_coord = Box::new((i as f64) * &inner_basis.slice(&s1) + (j as f64) * &inner_basis.slice(&s2));
                         // construct neighbors vector
@@ -162,17 +204,17 @@ impl Driver {
                                 neighbors.push(valid_index);
                             }
                         }
-                        if genval >= 0.5 {
+                        if genval >= spin_up_chance {
                             give_map.push(
                                 SpinNode::cons_node(
-                                    0.5, 
+                                    spin_unit, 
                                     array![i as f64, j as f64], 
                                     *cur_coord, 
                                     RwLock::new(neighbors)));
                         } else {
                             give_map.push(
                                 SpinNode::cons_node(
-                                    -0.5,
+                                    -spin_unit,
                                     array![i as f64, j as f64],
                                     *cur_coord,
                                     RwLock::new(neighbors)));
@@ -280,18 +322,18 @@ impl Driver {
                             }
                         }
                         // randomization conditions would go here or somewhere near here.
-                        let genval: f64 = rng.gen();
-                        if genval >= 0.5 {
+                        let genval: f64 = rng.gen_range(0_f64..1_f64);
+                        if genval >= spin_up_chance {
                             give_map.push(
                                 SpinNode::cons_node(
-                                    0.5,
+                                    spin_unit,
                                     array![i as f64, j as f64],
                                     *cur_coord.clone(),
                                     RwLock::new(neighbors)));
                         } else {
                             give_map.push(
                                 SpinNode::cons_node(
-                                    -0.5,
+                                    -spin_unit,
                                     array![i as f64, j as f64],
                                     *cur_coord.clone(),
                                     RwLock::new(neighbors)));
@@ -348,12 +390,23 @@ impl Driver {
             },
         }
         println!("Done!");
-        let (tx_psum, rx_psum) = bounded(cpu_num);
-        let (tx_go_psum, rx_go_psum) = bounded(cpu_num);
+        // let (tx_psum, rx_psum) = bounded(cpu_num);
+        // let (tx_go_psum, rx_go_psum) = bounded(cpu_num);
+        // let (tx_energy, rx_energy) = bounded(cpu_num);
+        // let (tx_go_energy, rx_go_energy) = bounded(cpu_num);
         // let (tx_flip_index, rx_flip_index) = unbounded();
-        let (tx_go_cluster, rx_go_cluster) = bounded(cpu_num);
-        let (tx_cluster_queue, rx_cluster_queue) = unbounded();
-        let (tx_done_cluster, rx_done_cluster) = bounded(cpu_num);
+        // let (tx_go_cluster, rx_go_cluster) = bounded(cpu_num);
+        // let (tx_cluster_queue, rx_cluster_queue) = unbounded();
+        // let (tx_done_cluster, rx_done_cluster) = bounded(cpu_num);
+
+        let psum_signaler = SignalContainer::new(cpu_num);
+        let psum_go_signaler = SignalContainer::new(cpu_num);
+        let energy_signlaer = SignalContainer::new(cpu_num);
+        let energy_go_signaler = SignalContainer::new(cpu_num);
+        let cluster_go_signaler = SignalContainer::new(cpu_num);
+        let cluster_done_signaler = SignalContainer::new(cpu_num);
+        let cluster_queue_signaler = SignalContainer::new(0);
+
         Self {
             internal_lattice: Lattice::new(give_map),
             basis: RwLock::new(inner_basis),
@@ -367,66 +420,130 @@ impl Driver {
             rem,
             magnitiztion_threads_started: false,
             cluster_threads_started: false,
+            energy_threads_started: false,
             mag_pool: crossbeam_workstealing_pool::small_pool(cpu_num),
+            energy_pool: crossbeam_workstealing_pool::small_pool(cpu_num),
             cluster_pool: crossbeam_workstealing_pool::small_pool(cpu_num),
-            tx_psum,
-            tx_go_psum,
-            rx_psum,
-            rx_go_psum,
+            magnitization_psum_signaler: psum_signaler,
+            magnitization_go_stop_signaler: psum_go_signaler,
+            energy_psum_signaler: energy_signlaer,
+            energy_go_stop_signaler: energy_go_signaler,
+            cluster_go_stop_signaler: cluster_go_signaler,
+            cluster_done_signaler,
+            cluster_queue_signaler,
             flip_index_vector: Arc::new(RwLock::new(vec![])),
-            tx_go_cluster,
-            rx_go_cluster,
-            tx_done_cluster,
-            rx_done_cluster,
-            tx_cluster_queue,
-            rx_cluster_queue,
-
         }
+    }
+
+    pub fn save_state(&self, fname: &str) {
+        self.internal_lattice.export_state_to_file(fname);
+    }
+
+    pub fn load_state(&mut self, fname: &str) {
+        self.internal_lattice.load_state_from_file(fname);
+    }
+
+    fn start_energy_threads(&mut self) {
+        if self.energy_threads_started != true {
+            let n_jobs = self.num_threads.clone();
+
+            for i in 0..n_jobs {
+                let shared_data = self.internal_lattice.internal_vector.clone();
+                let energy_psum_signaler = self.energy_psum_signaler.clone();
+                let energy_go_stop_signaler = self.energy_go_stop_signaler.clone();
+
+                let range: std::ops::Range<usize>;
+                if i != self.num_threads - 1 {
+                    println!("starting energy thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div - 1));
+                    range = (i * self.div)..((i+1) * self.div - 1);
+                } else {
+                    // Get the remainder in the last thread spawned. We could smear it out amongst
+                    // the other threads, but this is easier for all edge cases.
+                    println!("starting energy thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div + self.rem - 1));
+                    range = (i * self.div)..((i+1) * self.div + self.rem - 1);
+                }
+
+                self.energy_pool.execute(move || {
+
+                    loop {
+                        let mut energy_psum = 0.;
+                        if let SignalType::SigStart = energy_go_stop_signaler.recv().unwrap() {
+                            if let Ok(shared_vector) = shared_data.read().as_deref() {
+                                unsafe { for index in range.clone() {
+                                    let read_lock_nbrs = shared_vector.get_unchecked(index).neighbors.read().unwrap();
+                                    let target_spin = shared_vector.get_unchecked(index).get_spin();
+                                    for ith_nbr in 0..read_lock_nbrs.len() {
+                                        // SAFETY: bounds are explicitly known when range is generated
+                                        // and garuntees a valid return.
+                                        let nbr_index = read_lock_nbrs.get_unchecked(ith_nbr);
+                                        energy_psum += target_spin * shared_vector.get_unchecked(*nbr_index).get_spin();
+                                    }
+                                }}
+                            } else {
+                                panic!("couldnt read shared data in thread!")
+                            }
+                            match energy_psum_signaler.send(energy_psum) {
+                                Ok(_) => continue,
+                                Err(_) => return,
+                            }
+                        } else {
+                            println!("stopping thread");
+                            return;
+                        }
+                    }
+
+                });
+            } // for i in 0..n_jobs
+        }
+        self.energy_threads_started = true;
     }
 
     fn start_magnitization_threads(&mut self) {
         if self.magnitiztion_threads_started != true {
             let n_jobs = self.num_threads.clone();
-            // let (finished_tx, finished_rx) = channel();
+
             for i in 0..n_jobs {
                 let shared_data = self.internal_lattice.internal_vector.clone();
-                let tx_psum = self.tx_psum.clone();
-                let rx_go_psum = self.rx_go_psum.clone();
+                let magnitization_psum_signaler = self.magnitization_psum_signaler.clone();
+                let magnitization_go_stop_signaler = self.magnitization_go_stop_signaler.clone();
+
                 let wolff_run = self.cluster_threads_started.clone();
                 let range: std::ops::Range<usize>;
-                if i != n_jobs - 1 {
-                    println!("starting magnitization thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div));
-                    range = (i * self.div)..((i+1) * self.div);
+
+                if i != self.num_threads - 1 {
+                    println!("starting magnitization thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div - 1));
+                    range = (i * self.div)..((i+1) * self.div - 1);
                 } else {
-                    // get the remainder in the last thread. We could smear it out amongst the threads
-                    // but this is easier for all edge cases.
-                    println!("starting magnitization thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div + self.rem));
-                    range = (i * self.div)..((i+1) * self.div + self.rem);
+                    // Get the remainder in the last thread spawned. We could smear it out amongst
+                    // the other threads, but this is easier for all edge cases.
+                    println!("starting magnitization thread {i} with range {} to {}", (i * self.div), ((i+1) * self.div + self.rem - 1));
+                    range = (i * self.div)..((i+1) * self.div + self.rem - 1);
                 }
 
                 self.mag_pool.execute(move || {
 
                     loop {
                         let mut psum = 0.;
-                        if let SignalType::SigStart = rx_go_psum.recv().unwrap() {
+                        if let Ok(SignalType::SigStart) = magnitization_go_stop_signaler.recv() {
                             if let Ok(shared_vector) = shared_data.read().as_deref() {
                                 for index in range.clone() {
                                     // SAFETY: bounds are explicitly known when range is generated
                                     // and garuntees a valid return.
-                                    unsafe {
-                                        if wolff_run {
-                                            let mut write_lock = shared_vector.get_unchecked(index).marked.write().unwrap();
-                                            write_lock.unmark();
-                                        }
-                                        psum += shared_vector.get_unchecked(index).get_spin();
+                                unsafe { if wolff_run == true {
+                                        let mut write_lock = shared_vector.get_unchecked(index).marked.write().unwrap();
+                                        write_lock.unmark();
                                     }
+                                    psum += shared_vector.get_unchecked(index).get_spin(); }
                                 }
                             } else {
                                 panic!("couldnt read shared data in thread!")
                             }
-                            tx_psum.send(psum).unwrap();
+                            match magnitization_psum_signaler.send(psum) {
+                                Ok(_) => continue,
+                                Err(_) => return,
+                            }
                         } else {
-                            println!("stopping thread");
+                            println!("Stop stignal received, closing thread.");
                             return;
                         }
                     }
@@ -440,65 +557,61 @@ impl Driver {
     fn start_cluster_threads(&mut self, ) {
         if self.cluster_threads_started != true {
             let n_jobs = self.num_threads.clone();
-            // let (finished_tx, finished_rx) = channel();
             for i in 0..n_jobs {
                 println!("starting cluster thread {i}");
                 let shared_flip_vec = self.flip_index_vector.clone();
                 let shared_data = self.internal_lattice.internal_vector.clone();
-                let rx_go_cluster = self.rx_go_cluster.clone();
-                let tx_cluster_queue = self.tx_cluster_queue.clone();
-                let rx_cluster_queue = self.rx_cluster_queue.clone();
-                let tx_done_cluster = self.tx_done_cluster.clone();
+                let cluster_go_stop_signaler = self.cluster_go_stop_signaler.clone();
+                let cluster_queue_signaler = self.cluster_queue_signaler.clone();
+                let cluster_done_signaler = self.cluster_done_signaler.clone();
+
                 self.cluster_pool.execute(move || {
                     let mut rng = thread_rng();
                     'outer : loop {
-                        let sent_signal = rx_go_cluster.recv().unwrap();
-                        match sent_signal.0 {
-                            SignalType::SigStart => {
+                        if let Ok(sent_signal) = cluster_go_stop_signaler.recv() {
+                            if let SignalType::SigStart = sent_signal.0 {
                                 loop {
-                                    if let Ok(shared_vector) = shared_data.read().as_deref() {
-                                        // pop a value from the work queue if available, else move to waiting for next go signal.
-                                        if let Ok(check_index) = rx_cluster_queue.try_recv() {
-                                            // SAFETY: index is checked in calling function and nodes only store valid
-                                            // indicies to other nodes.
-                                            unsafe {
-                                                let read_lock = shared_vector.get_unchecked(check_index.0)
-                                                                                             .neighbors
-                                                                                             .read()
-                                                                                             .unwrap();
-                                                'nbr_loop : for i in 0..read_lock.len() {
-                                                    let nbr_index = *read_lock.get_unchecked(i);
-                                                    let nbr_spin = shared_vector.get_unchecked(nbr_index).get_spin();
-                                                    let mut marked_lock = shared_vector.get_unchecked(nbr_index).marked.write().unwrap();
-                                                    if nbr_spin == check_index.1 {
-                                                        if marked_lock.get_marked() == true {
-                                                            continue 'nbr_loop
-                                                        }
-                                                        marked_lock.flip();
-                                                        drop(marked_lock);
-                                                        if rng.gen_range(0_f64..1_f64) < sent_signal.1 {
-                                                            let mut write_lock = shared_flip_vec.write().unwrap();
-                                                            write_lock.push(nbr_index);
-                                                            tx_cluster_queue.send((nbr_index, nbr_spin)).unwrap();
-                                                        }
+                                    // pop a value from the work queue if available, else move to waiting for next go signal.
+                                    if let (Ok(read_lock_internal_vector), Ok(check_index)) = (shared_data.read().as_deref(), cluster_queue_signaler.try_recv()) {
+                                        // SAFETY: index is checked in calling function and nodes only store valid
+                                        // indicies to other nodes.
+                                    unsafe { let read_lock_shared_vector = read_lock_internal_vector.get_unchecked(check_index.0)
+                                                                .neighbors
+                                                                .read()
+                                                                .unwrap();
+                                        'nbr_loop : for i in 0..read_lock_shared_vector.len() {
+                                            let nbr_index = *read_lock_shared_vector.get_unchecked(i);
+                                            let nbr_spin = read_lock_internal_vector.get_unchecked(nbr_index).get_spin();
+                                            // if the two spins are the same
+                                            if nbr_spin == check_index.1 {
+                                                // check that the node was not previously processed and marked
+                                                if let Ok(read_lock_marked) = read_lock_internal_vector.get_unchecked(nbr_index).marked.try_read() {
+                                                    if read_lock_marked.get_marked() == true {
+                                                        drop(read_lock_marked);
+                                                        continue 'nbr_loop
                                                     }
+                                                } else { continue 'nbr_loop }
+                                                // if the node was not processed, mark it now
+                                                if let Ok(mut write_lock_marked) = read_lock_internal_vector.get_unchecked(nbr_index).marked.try_write() {
+                                                    write_lock_marked.mark();
+                                                } else { continue 'nbr_loop }
+                                                if rng.gen_range(0_f64..1_f64) < sent_signal.1 {
+                                                    let mut write_lock = shared_flip_vec.write().unwrap();
+                                                    write_lock.push(nbr_index);
+                                                    cluster_queue_signaler.send((nbr_index, nbr_spin)).unwrap();
                                                 }
                                             }
-                                        } else {
-                                            // println!("thread done");
-                                            // send done signal to main
-                                            tx_done_cluster.send(1).unwrap();
-                                            continue 'outer
-                                        }
+                                        }}
                                     } else {
-                                        panic!("couldnt read shared data in thread!")
+                                        // send done signal to main
+                                        cluster_done_signaler.send(1).unwrap();
+                                        continue 'outer
                                     }
                                 }
-                            },
-                            SignalType::SigStop => {
-                                println!("stopping thread");
+                            } else {
+                                println!("Stop stignal received, closing thread.");
                                 return;
-                            },
+                            }
                         }
                     }
 
@@ -509,18 +622,13 @@ impl Driver {
     }
 
     pub fn stop_threads(self) {
-        for _ in 0..self.num_threads {
-            self.tx_go_psum.send(SignalType::SigStop).unwrap();
-            self.tx_go_cluster.send((SignalType::SigStop, 0.)).unwrap();
-        }
-        println!("I am not even going to bother with figuring out how to do this as the threads just wont die no matter what I do, so live with all the errors, though know that they are really just the OS complaining that the threads are still alive or were already killed. Not much I can do with my current understanding of this language.\n");
         if self.magnitiztion_threads_started {
-            drop(self.tx_go_psum);
+            self.magnitization_go_stop_signaler.close_channel();
         }
         if self.cluster_threads_started {
-            drop(self.tx_go_cluster);
+            self.cluster_go_stop_signaler.close_channel();
         }
-        println!("threads closed, or not. They may throw a panic, but this technically kills them so its all good. just ignore the incoming text wall...\n")
+        println!("Threads closed!\n")
     }
 
     pub fn get_spin_at(&self, index: usize) -> f64 {
@@ -530,7 +638,7 @@ impl Driver {
             None => 0.,
         }
         } else {
-            panic!("couldnt get spin")
+            panic!("Couldnt get spin")
         }
     }
 
@@ -542,126 +650,72 @@ impl Driver {
             }
         }
     }
+
+    pub fn get_spin_energy(&self) -> (f64, f64) {
+        return (self.get_magnitization(), self.get_energy());
+    }
     
     pub fn get_magnitization(&self) -> f64 {
+        let mut mag = 0.;
         for _ in 0..self.num_threads {
-            self.tx_go_psum.send(SignalType::SigStart).unwrap();
+            self.magnitization_go_stop_signaler.send(SignalType::SigStart).unwrap();
         }
-        self.rx_psum.iter().take(self.num_threads).fold(0., |a, b| a + b)
+        for _ in 0..self.num_threads {
+            if let Ok(psum) = self.magnitization_psum_signaler.recv() {
+                mag += psum;
+            } else { panic!("Channel is already closed, something went wrong!") }
+        }
+        mag
+    }
+
+    pub fn get_energy(&self) -> f64 {
+        let mut energy = 0.;
+        for _ in 0..self.num_threads {
+            self.energy_go_stop_signaler.send(SignalType::SigStart).unwrap();
+        }
+        for _ in 0..self.num_threads {
+            if let Ok(psum) = self.energy_psum_signaler.recv() {
+                energy += psum;
+            } else { panic!("Channel is already closed, something went wrong!") }
+        }
+        energy
     }
     
-    fn energy_worker<'a>(&'a self, range: Range<usize>) -> f64 {
-        let thread_return_value = thread::scope(|scope| {
-            let th = scope.spawn(move |_| {
-                let mut psum = 0.;
-                for i in range {
-                    match self.sym_type {
-                        SymmetryType::C3V => {
-                            // 3 neighbors at most, so 0..3 is the range
-                            for j in 0..3 {
-                                if let Some(valid_index) = indexmod(i, j, self.x_size, self.y_size, self.sym_type) {
-                                    psum += self.get_spin_at(valid_index);
-                                }
-                            }
-                        },
-                        SymmetryType::C4V => {
-                            // 4 neighbors at most, so 0..4 is the range
-                            for j in 0..4 {
-                                if let Some(valid_index) = indexmod(i, j, self.x_size, self.y_size, self.sym_type) {
-                                    psum += self.get_spin_at(valid_index);
-                                }
-                            }
-                        },
-                        SymmetryType::C6V => {
-                            // 6 neighbors at most, so 0..6 is the range
+    // fn get_energy<'a>(&'a self) -> f64 {
+    //     let mut energy = 0.;
+    //     for i in 0usize..self.num_threads {
+    //         let range: std::ops::Range<usize>;
+    //             if i != self.num_threads - 1 {
+    //                 range = (i * self.div)..((i+1) * self.div - 1);
+    //             } else {
+    //                 // Get the remainder in the last thread spawned. We could smear it out amongst
+    //                 // the other threads, but this is easier for all edge cases.
+    //                 range = (i * self.div)..((i+1) * self.div + self.rem - 1);
+    //             }
+    //         energy += self.energy_worker(range);
+    //     }
+    //     return energy;
+    // }
 
-                        },
-                    }
-                }
-                psum
-            });
-            let psum = th.join().unwrap();
-            psum
-        }
-        ).unwrap();
-        return thread_return_value;
-    }
+    // fn energy_worker<'a>(&'a self, range: Range<usize>) -> f64 {
+    //     let thread_return_value = thread::scope(|scope| {
+    //         let th = scope.spawn(move |_| {
+    //             let mut partial_energy = 0.;
+    //             for node_index in range {
+    //                 partial_energy += self.get_spin_at(node_index) * self.get_neighbors_spin_sum(node_index);
+    //             }
+    //             partial_energy
+    //         });
+    //         let psum = th.join().unwrap();
+    //         psum
+    //     }
+    //     ).unwrap();
+    //     return -thread_return_value;
+    // }
 
-    fn get_energy<'a>(&'a self) -> f64 {
-        let mut energy = 0.;
-        for i in 0usize..self.num_threads {
-            let range: std::ops::Range<usize>;
-                if i != self.num_threads - 1 {
-                    range = (i * self.div)..((i+1) * self.div);
-                } else {
-                    // Get the remainder in the last thread spawned. We could smear it out amongst
-                    // the other threads, but this is easier for all edge cases.
-                    range = (i * self.div)..((i+1) * self.div + self.rem);
-                }
-            energy += self.energy_worker(range);
-        }
-        return energy;
-    }
-
-    pub fn spin_energy(&mut self, beta_list: Vec<f64>, times: usize, iteration_scheme: usize) {
-        self.start_magnitization_threads();
-        if iteration_scheme == 1 {
-            self.start_cluster_threads();
-        }
-        let magnitization = self.get_magnitization();
-        
-        let mut energy = self.get_energy();
-        println!("The initial energy is {}", energy);
-        let mut energy_vec: Vec<f64> = vec![];
-        
-        let mut ms: Vec<f64> = vec![magnitization, magnitization.powf(2.)];
-        let mut es: Vec<f64> = vec![energy, energy.powf(2.)];
-
-        let mut m_vec: Vec<f64> = vec![];
-        let mut e_vec: Vec<f64> = vec![];
-        let mut c_vec: Vec<f64> = vec![];
-        let mut x_vec: Vec<f64> = vec![];
-        let n1 = (self.total_nodes as f64).powf(2.)*(times as f64);
-        let n2 = (self.total_nodes as f64).powf(2.)*(times as f64).powf(2.);
-        
-        let len_beta = beta_list.len();
-        let tot_time: u64 = times as u64 * len_beta as u64;
-
-        let bar1 = ProgressBar::new(tot_time);
-
-        for beta_val in beta_list {
-            // let mut run_avg: Vec<f64> = vec![];
-            // let mut cur_run_sum = 0.; 
-            for cur_t in 0..times {
-                if iteration_scheme == 0 {
-                    energy = self.metropolis_iter(&beta_val, energy);
-                } else
-                if iteration_scheme == 1 {
-                    energy = self.wolff_iter(&beta_val, energy);
-                } else {
-                    panic!("invalid option! expected 0 or 1, got {}", iteration_scheme);
-                }
-                let cur = self.get_magnitization();
-                // begining the data collection after a few iterations gives better
-                // overall graphs becuase the system has had time to relax
-                if cur_t > (0.1 * times as f64) as usize {
-                    ms[0] += magnitization.abs();
-                    ms[1] += magnitization.powf(2.);
-                    es[0] += energy;
-                    es[1] += energy.powf(2.);
-                }
-                // cur_run_sum += cur;
-                m_vec.push(cur / self.total_nodes as f64);
-                e_vec.push(energy / self.total_nodes as f64);  // TODO add in actual value
-                c_vec.push(es[1] / n1 - es[0].powf(2.) / n2 * beta_val.powf(2.));
-                x_vec.push(ms[1] / n1 - ms[0].powf(2.) / n2 * beta_val);
-                bar1.inc(1);
-            }
-            energy_vec.push(energy.clone());
-        }
-        bar1.abandon();
-        println!("spin_energy finished! Writing data to file, 少々お待ちして下さい");
-        let bar2 = ProgressBar::new_spinner();
+    fn save_files(&self, m_vec: Vec<f64>, e_vec: Vec<f64>, x_vec: Vec<f64>, c_vec: Vec<f64>) {
+        println!("Writing data to file, 少々お待ちして下さい");
+        let file_progress = ProgressBar::new_spinner();
         
         // setup saving the output file
         let path = Path::new("mag_data.dat");
@@ -679,7 +733,7 @@ impl Driver {
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
                 Ok(_) => {
-                    bar2.inc(1);
+                    file_progress.inc(1);
                     continue;
                 },
             }
@@ -700,7 +754,7 @@ impl Driver {
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
                 Ok(_) => {
-                    bar2.inc(1);
+                    file_progress.inc(1);
                     continue;
                 },
             }
@@ -721,7 +775,7 @@ impl Driver {
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
                 Ok(_) => {
-                    bar2.inc(1);
+                    file_progress.inc(1);
                     continue;
                 },
             }
@@ -742,16 +796,101 @@ impl Driver {
             match file.write_all(write_str.as_bytes()) {
                 Err(why) => panic!("couldn't write to {}: {}", display, why),
                 Ok(_) => {
-                    bar2.inc(1);
+                    file_progress.inc(1);
                     continue;
                 },
             }
         }
-        bar2.abandon();
-        println!("Sucessfully wrote file! Exiting...");
+        file_progress.abandon();
+        println!("Sucessfully wrote files!");
     }
 
-    fn wolff_iter(&mut self, beta: &f64, energy: f64) -> f64 {
+    pub fn spin_energy(&mut self, beta_list: Vec<f64>, times: usize, iteration_scheme: usize) {
+        self.start_magnitization_threads();
+        self.start_energy_threads();
+        if iteration_scheme == 1 {
+            self.start_cluster_threads();
+        }
+        
+        let (initial_magnitization, initial_energy) = self.get_spin_energy();
+        println!("\nThe initial energy is {}, and the initial magnitization is {}.\n", initial_energy, initial_magnitization);
+        
+        let mut energy: f64;
+        let mut magnitization: f64;
+        let mut ms: Vec<f64> ;
+        let mut es: Vec<f64>;
+        
+        let mut m_vec: Vec<f64> = vec![];
+        let mut e_vec: Vec<f64> = vec![];
+        let mut c_vec: Vec<f64> = vec![];
+        let mut x_vec: Vec<f64> = vec![];
+        let n1 = (self.total_nodes as f64)*(times as f64);
+        let n2 = (self.total_nodes as f64)*(times as f64).powf(2.);
+        
+        let len_beta = beta_list.len();
+        let tot_time: u64 = times as u64 * len_beta as u64;
+        
+        let bar1 = ProgressBar::new(tot_time);
+        
+        // load the initial state at tbe begining of each new beta
+        for beta_val in beta_list {
+            match self.sym_type {
+                SymmetryType::C3V => {
+                    self.internal_lattice.load_state_from_file("c3v.dat");
+                },
+                SymmetryType::C4V => {
+                    self.internal_lattice.load_state_from_file("c4v.dat");
+                },
+                SymmetryType::C6V => {
+                    self.internal_lattice.load_state_from_file("c6v.dat");
+                },
+                
+            }
+            
+            magnitization = initial_magnitization;
+            energy = initial_energy;
+            let (mut d_energy, mut d_mag) = (0., 0.);
+            ms = vec![0., 0.];
+            es = vec![0., 0.];
+
+            for cur_t in 0..times {
+                // preform an iteration scheme of metropolis or wolff
+                if iteration_scheme == 0 {
+                    (d_energy, d_mag) = self.metropolis_iter(&beta_val);
+                } else
+                if iteration_scheme == 1 {
+                    (d_energy, d_mag) = self.wolff_iter(&beta_val);
+                } else {
+                    panic!("invalid option! expected 0 or 1, got {}", iteration_scheme);
+                }
+                // (magnitization, energy) = self.get_spin_energy();
+                // Beginning the data collection after a few iterations gives better
+                // overall graphs becuase the system has had time to relax
+                // if cur_t > (0.375 * times as f64) as usize {
+                // }
+                magnitization += d_mag;
+                energy += d_energy;
+                ms[0] += magnitization;
+                ms[1] += magnitization.powf(2.);
+                es[0] += energy;
+                es[1] += energy.powf(2.);
+                bar1.inc(1);
+            }
+            m_vec.push(ms[0] / n1);
+            e_vec.push(es[0] / n1);
+            c_vec.push((es[1] / n1 - es[0].powf(2.) / n2) * beta_val.powf(2.));
+            x_vec.push((ms[1] / n1 - ms[0].powf(2.) / n2) * beta_val);
+        } // for beta_val in beta_list end
+        bar1.abandon();
+        println!("spin_energy finished!");
+        
+        // save files
+        if true {
+            self.save_files(m_vec, e_vec, x_vec, c_vec);
+        }
+    }
+    
+    fn wolff_iter(&mut self, beta: &f64) -> (f64, f64) {
         //
         // Purpose
         // -------
@@ -763,76 +902,85 @@ impl Driver {
         // println!("{balcond}");
         let mut rngx = thread_rng();
         let mut rngy = thread_rng();
-        let mut rng_flip = thread_rng();
-        let mut x_y: usize;
+        let mut target_index: usize;
         let mut target_spin: f64;
         let mut delta_energy: f64 = 0.;
-        // let (tx_cluster, rx_cluster) = unbounded();
+        let mut delta_mag: f64 = 0.;
 
         // pick random point
         'node_selection : loop {
-            x_y = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
-            target_spin = self.get_spin_at(x_y);
-            // println!("{}", &x_y);
-            if target_spin != 0. { break 'node_selection; }
-            else { continue 'node_selection; }
+            target_index = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
+            target_spin = self.get_spin_at(target_index);
+            if target_spin != 0. { break 'node_selection }
+            else { continue 'node_selection }
+        }
+
+        // add target node to flip list
+        // SAFETY: target_index was verified in get_spin_at already
+        unsafe {
+            let mut write_lock_internal_vector = self.internal_lattice.internal_vector.write().unwrap();
+            let target_node = write_lock_internal_vector.get_unchecked_mut(target_index);
+            target_node.marked
+                .write()
+                .unwrap()
+                .mark();
+            drop(write_lock_internal_vector);
         }
 
         // push the random node neighbors index to the work queue
-        if let Ok(value) = self.internal_lattice.internal_vector.read() {
-            if let Some(node) = value.get(x_y) {
-                let read_lock_nbrs = node.neighbors.read().unwrap();
+        if let Ok(read_lock_internal_vector) = self.internal_lattice.internal_vector.read() {
+            if let Some(target_node) = read_lock_internal_vector.get(target_index) {
+                let read_lock_nbrs = target_node.neighbors.read().unwrap();
+                let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap();
                 for i in 0..read_lock_nbrs.len() {
-                    // SAFETY: bounds checked in Driver::new, garaunteed valid return.
-                    unsafe {
-                        let nbr_index = *read_lock_nbrs.get_unchecked(i);
-                        if self.get_spin_at(nbr_index) == target_spin {
-                            // if the index is the same as the randomly picked node, add it to the
-                            // queue.
-                            let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap();
-                            write_lock_flip_index_vector.push(nbr_index);
-                            self.tx_cluster_queue.send((nbr_index, target_spin)).unwrap();
-                            drop(write_lock_flip_index_vector);
+                // SAFETY: bounds checked in Driver::new, garaunteed valid return.
+                unsafe { let nbr_index = *read_lock_nbrs.get_unchecked(i);
+                    if self.get_spin_at(nbr_index) == target_spin {
+                        // if the index is the same as the randomly picked node, add it to the
+                        // queue.
+                        if i == 0 {
+                            write_lock_flip_index_vector.push(target_index);
                         }
-                    }
+                        write_lock_flip_index_vector.push(nbr_index);
+                        self.cluster_queue_signaler.send((nbr_index, target_spin)).unwrap();
+                    }}
                 }
+                drop(write_lock_flip_index_vector);
             }
         }
 
         // spin up threads for generating a cluster flip and then wait for them to finish.
         // println!("sending go signal to cluster threads");
         for _ in 0..self.num_threads {
-            self.tx_go_cluster.send((SignalType::SigStart, balcond)).unwrap();
+            self.cluster_go_stop_signaler.send((SignalType::SigStart, balcond)).unwrap();
         }
         // println!("waiting for threads to finish...");
-        while self.rx_done_cluster.is_full() == false {
-            stdth::sleep(time::Duration::from_micros(10));
+        while self.cluster_done_signaler.is_full() == false {
+            stdth::sleep(time::Duration::from_micros(1));
         }
         // println!("Clearing queue");
         for _ in 0..self.num_threads {
             // clear the queue
-            _ = self.rx_done_cluster.recv().unwrap();
+            _ = self.cluster_done_signaler.recv().unwrap();
         }
-
+        
         // flip spins and calculate the path integral value of the change in energy dE
         let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap(); 
         loop {
             // while the flip queue is not empty, process nodes
             if let Some(cur_flip_index) = write_lock_flip_index_vector.pop() {
-                if rng_flip.gen_range(0_f64..1_f64) < balcond {
-                    let nbr_energy = self.get_neighbors_spin_sum(cur_flip_index);
-                    delta_energy += 2.*target_spin*nbr_energy;
-                    self.flip_node_at(cur_flip_index);
+                let nbr_energy = self.get_neighbors_spin_sum(cur_flip_index);
+                delta_energy += -target_spin*nbr_energy;
+                delta_mag += -target_spin;
+                } else {
+                    break
                 }
-            } else {
-                break
             }
-        }
-        drop(write_lock_flip_index_vector);
-        return energy + delta_energy;
+            drop(write_lock_flip_index_vector);
+            return (delta_energy, delta_mag);
     }
 
-    fn metropolis_iter(&mut self, beta: &f64, energy: f64) -> f64 {
+    fn metropolis_iter(&mut self, beta: &f64) -> (f64, f64) {
         let mut rngx = thread_rng();
         let mut rngy = thread_rng();
         let mut rng_flip = thread_rng();
@@ -842,44 +990,45 @@ impl Driver {
         'node_selection : loop {
             x_y = rngx.gen_range(0..self.x_size) + rngy.gen_range(0..self.y_size) * self.x_size;
             target_spin = self.get_spin_at(x_y);
-            // println!("{}", &x_y);
             if target_spin != 0. { break 'node_selection; }
             else { continue 'node_selection; }
         }
 
         let mut delta_energy: f64;
+        let delta_mag: f64;
         // calculate the sum of energy of the neighbors
         let nbr_energy = self.get_neighbors_spin_sum(x_y);
-        delta_energy = 2.*target_spin*nbr_energy;
-        if delta_energy <= 0. {
+        delta_energy = -target_spin*nbr_energy;
+        if delta_energy > 0. && rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy) {
             self.flip_node_at(x_y);
             // dE = 2.*target_spin*nbr_E;
+            delta_mag = -target_spin;
         }
-        else if rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy) {
+        else if delta_energy <= 0. {
             self.flip_node_at(x_y);
             // dE = 2.*target_spin*nbr_E;
+            delta_mag = -target_spin;
         }
         else {
             delta_energy = 0.;
+            delta_mag = 0.;
         }
-
-        return energy + delta_energy;
+        return (delta_energy, delta_mag);
     }
 
     fn get_neighbors_spin_sum(&self, x_y: usize) -> f64 {
         let mut nbr_energy = 0.;
         if let Ok(value) = self.internal_lattice.internal_vector.read() {
             if let Some(node) = value.get(x_y) {
+                // let target_spin = node.get_spin();
                 let read_lock_nbrs = node.neighbors.read().unwrap();
-                for i in 0..read_lock_nbrs.len() {
+                for ith_nbr_index in 0..read_lock_nbrs.len() {
                     // SAFETY: bounds checked in random node selection, garaunteed valid return
-                    unsafe {
-                        nbr_energy += self.get_spin_at(*read_lock_nbrs.get_unchecked(i));
-                    }
+                    unsafe { nbr_energy += self.get_spin_at(*read_lock_nbrs.get_unchecked(ith_nbr_index)); }
                 }
             }
         }
-        nbr_energy
+        return nbr_energy;
     }
 }
     
