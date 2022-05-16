@@ -339,14 +339,6 @@ impl Driver {
             },
         }
         println!("Done!");
-        // let (tx_psum, rx_psum) = bounded(cpu_num);
-        // let (tx_go_psum, rx_go_psum) = bounded(cpu_num);
-        // let (tx_energy, rx_energy) = bounded(cpu_num);
-        // let (tx_go_energy, rx_go_energy) = bounded(cpu_num);
-        // let (tx_flip_index, rx_flip_index) = unbounded();
-        // let (tx_go_cluster, rx_go_cluster) = bounded(cpu_num);
-        // let (tx_cluster_queue, rx_cluster_queue) = unbounded();
-        // let (tx_done_cluster, rx_done_cluster) = bounded(cpu_num);
 
         let psum_signaler = SignalContainer::new(cpu_num);
         let psum_go_signaler = SignalContainer::new(cpu_num);
@@ -431,7 +423,7 @@ impl Driver {
                             } else {
                                 panic!("couldnt read shared data in thread!")
                             }
-                            match energy_psum_signaler.send(energy_psum) {
+                            match energy_psum_signaler.send(-energy_psum) {
                                 Ok(_) => continue,
                                 Err(_) => return,
                             }
@@ -547,7 +539,7 @@ impl Driver {
                                                 if rng.gen_range(0_f64..1_f64) < sent_signal.1 {
                                                     let mut write_lock = shared_flip_vec.write().unwrap();
                                                     write_lock.push(nbr_index);
-                                                    cluster_queue_signaler.send((nbr_index, nbr_spin)).unwrap();
+                                                    cluster_queue_signaler.send((nbr_index, check_index.1)).unwrap();
                                                 }
                                             }
                                         }}
@@ -854,7 +846,7 @@ impl Driver {
                 // SAFETY: bounds checked in Driver::new, garaunteed valid return.
                 unsafe { let nbr_index = *read_lock_nbrs.get_unchecked(i);
                     if self.get_spin_at(nbr_index) == target_spin {
-                        // if the index is the same as the randomly picked node, add it to the
+                        // if the spin is the same as the randomly picked node, add it to the
                         // queue.
                         if i == 0 {
                             write_lock_flip_index_vector.push(target_index);
@@ -901,6 +893,7 @@ impl Driver {
                 }
             }
             drop(write_lock_flip_index_vector);
+            println!("{}, {}", delta_energy, delta_mag);
             return (delta_energy, delta_mag);
     }
 
