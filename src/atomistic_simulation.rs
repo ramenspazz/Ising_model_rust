@@ -408,7 +408,7 @@ impl Driver {
 
                     loop {
                         let mut energy_psum = 0.;
-                        if let SignalType::SigStart = energy_go_stop_signaler.recv().unwrap() {
+                        if let Ok(SignalType::SigStart) = energy_go_stop_signaler.recv() {
                             if let Ok(shared_vector) = shared_data.read().as_deref() {
                                 unsafe { for index in range.clone() {
                                     let read_lock_nbrs = shared_vector.get_unchecked(index).neighbors.read().unwrap();
@@ -428,7 +428,7 @@ impl Driver {
                                 Err(_) => return,
                             }
                         } else {
-                            println!("stopping thread");
+                            println!("Shutting-down thread.");
                             return;
                         }
                     }
@@ -484,7 +484,7 @@ impl Driver {
                                 Err(_) => return,
                             }
                         } else {
-                            println!("Stop stignal received, closing thread.");
+                            println!("Shutting-down thread.");
                             return;
                         }
                     }
@@ -586,6 +586,7 @@ impl Driver {
         }
     }
 
+    /// Flips the spin pointed to by the parameter `index`. This function requires a write lock on `internal_lattice.internal_vector`
     fn flip_node_at(&self, index: usize) {
         if let Ok(mut lock) = self.internal_lattice.internal_vector.write() {
             match lock.get_mut(index) {
@@ -596,7 +597,9 @@ impl Driver {
     }
 
     pub fn get_spin_energy(&self) -> (f64, f64) {
-        return (self.get_magnitization(), self.get_energy());
+        if self.magnitiztion_threads_started && self.energy_threads_started {
+            return (self.get_magnitization(), self.get_energy());
+        } else { panic!("Threads are not yet started!"); }
     }
     
     pub fn get_magnitization(&self) -> f64 {
@@ -766,7 +769,7 @@ impl Driver {
             ms = vec![0., 0.];
             es = vec![0., 0.];
 
-            for _ in 0..times {
+            for cur_t in 0..times {
                 // preform an iteration scheme of metropolis or wolff
                 if iteration_scheme == 0 {
                     (d_energy, d_mag) = self.metropolis_iter(&beta_val);
@@ -776,23 +779,22 @@ impl Driver {
                 } else {
                     panic!("invalid option! expected 0 or 1, got {}", iteration_scheme);
                 }
-                // (magnitization, energy) = self.get_spin_energy();
                 // Beginning the data collection after a few iterations gives better
                 // overall graphs becuase the system has had time to relax
-                // if cur_t > (0.375 * times as f64) as usize {
-                // }
-                magnitization += d_mag;
-                energy += d_energy;
-                ms[0] += magnitization;
-                ms[1] += magnitization.powf(2.);
-                es[0] += energy;
-                es[1] += energy.powf(2.);
+                if cur_t > (0.05 * times as f64) as usize {
+                    magnitization += d_mag;
+                    energy += d_energy;
+                    ms[0] += magnitization;
+                    ms[1] += magnitization.powf(2.);
+                    es[0] += energy;
+                    es[1] += energy.powf(2.);
+                }
                 bar1.inc(1);
             }
             m_vec.push(ms[0] / n1);
             e_vec.push(es[0] / n1);
-            c_vec.push((es[1] / n1 - es[0].powf(2.) / n2) * beta_val.powf(2.));
             x_vec.push((ms[1] / n1 - ms[0].powf(2.) / n2) * beta_val);
+            c_vec.push((es[1] / n1 - es[0].powf(2.) / n2) * beta_val.powf(2.));
         } // for beta_val in beta_list end
         bar1.abandon();
         println!("spin_energy finished!");
@@ -811,7 +813,8 @@ impl Driver {
     /// if the required threads are not alive already, launch them.
     fn wolff_iter(&mut self, beta: &f64) -> (f64, f64) {
         let balance_condition = 1. - consts::E.powf(-20.*beta*self.exchange_constant);
-        let mut rngspin = thread_rng();
+        let mut rng_spin_select = thread_rng();
+        let mut rng_flip = thread_rng();
         let mut target_index: usize;
         let mut target_spin: f64;
         let mut delta_energy: f64 = 0.;
@@ -819,15 +822,15 @@ impl Driver {
 
         // select a random node
         'node_selection : loop {
-            target_index = rngspin.gen_range(0..(self.x_size*self.y_size - 1));
+            target_index = rng_flip.gen_range(0..(self.x_size*self.y_size - 1));
             target_spin = self.get_spin_at(target_index);
             if target_spin != 0. { break 'node_selection; }
             else { continue 'node_selection; }
         }
 
-        // add target node to flip list
-        // SAFETY: target_index was verified in get_spin_at already
-        unsafe {
+            // add target node to flip list
+            // SAFETY: target_index was verified in get_spin_at already
+            unsafe {
             let mut write_lock_internal_vector = self.internal_lattice.internal_vector.write().unwrap();
             let target_node = write_lock_internal_vector.get_unchecked_mut(target_index);
             target_node.marked
@@ -835,66 +838,49 @@ impl Driver {
                 .unwrap()
                 .mark();
             drop(write_lock_internal_vector);
-        }
-
-        // push the random node neighbors index to the work queue
-        if let Ok(read_lock_internal_vector) = self.internal_lattice.internal_vector.read() {
-            if let Some(target_node) = read_lock_internal_vector.get(target_index) {
-                let read_lock_nbrs = target_node.neighbors.read().unwrap();
-                let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap();
-                for i in 0..read_lock_nbrs.len() {
-                // SAFETY: bounds checked in Driver::new, garaunteed valid return.
-                unsafe { let nbr_index = *read_lock_nbrs.get_unchecked(i);
-                    if self.get_spin_at(nbr_index) == target_spin {
-                        // if the spin is the same as the randomly picked node, add it to the
-                        // queue.
-                        if i == 0 {
-                            write_lock_flip_index_vector.push(target_index);
-                        }
-                        write_lock_flip_index_vector.push(nbr_index);
-                        self.cluster_queue_signaler.send((nbr_index, target_spin)).unwrap();
-                    }}
-                }
-                drop(write_lock_flip_index_vector);
             }
-        }
-
+            
+            // push the random node neighbors indexs to the work queue
+            if let Ok(read_lock_internal_vector) = self.internal_lattice.internal_vector.read() {
+                if let Some(target_node) = read_lock_internal_vector.get(target_index) {
+                    let read_lock_nbrs = target_node.neighbors.read().unwrap();
+                    let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap();
+                    for i in 0..read_lock_nbrs.len() {
+                    // SAFETY: bounds checked in Driver::new, garaunteed valid return.
+                        unsafe {
+                        let nbr_index = *read_lock_nbrs.get_unchecked(i);
+                        if self.get_spin_at(nbr_index) == target_spin {
+                            // if the spin is the same as the randomly picked node, add it to the
+                            // queue.
+                            if i == 0 {
+                                write_lock_flip_index_vector.push(target_index);
+                            }
+                            write_lock_flip_index_vector.push(nbr_index);
+                            self.cluster_queue_signaler.send((nbr_index, target_spin)).unwrap();
+                        }}
+                    }
+                    drop(write_lock_flip_index_vector);
+                }
+            }
+        
         // spin up threads for generating a cluster flip and then wait for them to finish.
         // println!("sending go signal to cluster threads");
         for _ in 0..self.num_threads {
-            self.cluster_go_stop_signaler.send((SignalType::SigStart, balance_condition)).unwrap();
+        self.cluster_go_stop_signaler.send((SignalType::SigStart, balance_condition)).unwrap();
         }
         // println!("waiting for threads to finish...");
         while self.cluster_done_signaler.is_full() == false {
-            stdth::sleep(time::Duration::from_micros(1));
+        stdth::sleep(time::Duration::from_micros(1));
         }
         // println!("Clearing queue");
         for _ in 0..self.num_threads {
-            // clear the queue
-            _ = self.cluster_done_signaler.recv().unwrap();
+        // clear the queue
+        _ = self.cluster_done_signaler.recv().unwrap();
         }
-        
-        // flip spins and calculate the path integral value of the change in energy dE
-        let mut write_lock_flip_index_vector = self.flip_index_vector.write().unwrap(); 
-        let read_lock_internal_vector = self.internal_lattice.internal_vector.read().unwrap();
-        loop {
-            // while the flip queue is not empty, process nodes
-            if let Some(cur_flip_index) = write_lock_flip_index_vector.pop() {
-        // SAFETY: cur_flip_index will always point to a valid node
-        unsafe {let cur_target = read_lock_internal_vector.get_unchecked(cur_flip_index);
-                let cur_target_nbrs_lock = cur_target.neighbors.read().unwrap();
-                for flip_node_nbrs_index in cur_target_nbrs_lock.iter() {
-                    delta_energy += cur_target.get_spin() * self.get_neighbors_spin_sum(*flip_node_nbrs_index);
-                }}
-                delta_energy += -target_spin * self.get_neighbors_spin_sum(cur_flip_index);
-                delta_mag += -target_spin;
-                } else {
-                    break
-                }
-            }
-            drop(write_lock_flip_index_vector);
-            println!("{}, {}", delta_energy, delta_mag);
-            return (delta_energy, delta_mag);
+
+        println!("TODO: Wolff in progress...");
+
+        return (delta_energy, delta_mag);
     }
 
     /// Evolves the lattice by one iteration using the metropolis-hastings scheme.
@@ -926,12 +912,7 @@ impl Driver {
         }
         drop(read_lock_internal_vector);
 
-                
-        if delta_energy > 0. && (rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy)) {
-            self.flip_node_at(target_index);
-            delta_mag = -target_spin;
-        }
-        else if delta_energy <= 0. {
+        if (delta_energy > 0. && (rng_flip.gen_range(0_f64..1_f64) < consts::E.powf(-beta*self.exchange_constant*delta_energy))) || delta_energy <= 0. {
             self.flip_node_at(target_index);
             delta_mag = -target_spin;
         }
@@ -939,6 +920,7 @@ impl Driver {
             delta_energy = 0.;
             delta_mag = 0.;
         }
+
         return (delta_energy, delta_mag);
     }
 
