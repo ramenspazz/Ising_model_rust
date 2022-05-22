@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 #[derive(Clone, PartialEq)]
 pub enum SignalType {
     SigStart,
@@ -18,14 +20,17 @@ impl<T> SignalContainer<T> {
     /// A special case is zero-capacity channel, which cannot hold any messages. Instead, send and
     /// receive operations must appear at the same time in order to pair up and pass the message over.
     pub fn new(cap: usize) -> Self {
-        if cap == 0 {
-            let (tx, rx) = crossbeam_channel::unbounded();
-            return Self { tx, rx };
-        } else if cap > 0 {
-            let (tx, rx) = crossbeam_channel::bounded(cap);
-            return Self { tx, rx };
-        }
-        panic!("Error occured!");
+	match cap.cmp(&0_usize) {
+	    Ordering::Equal => {
+	        let (tx, rx) = crossbeam_channel::unbounded();
+                Self { tx, rx }
+	    },
+            Ordering::Greater => {
+                let (tx, rx) = crossbeam_channel::bounded(cap);
+                Self { tx, rx }
+            },
+            Ordering::Less => panic!("cap must be positive or equal to 0!"),
+	}
     }
 
     pub fn close_channel(self) {

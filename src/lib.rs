@@ -1,6 +1,8 @@
+
+
 /// Purpose
 /// -------
-/// Returns a list with the quotient and remainder of `dividend` / `divisor`.
+/// Returns a tuple with the quotient and remainder of `dividend` / `divisor`.
 /// I designed this to run in exponential jumps of the power of 2 using the
 /// left bitshift operator, so it functions faster than the standard
 /// implimentation of the remainder algorithm that I have seen.
@@ -51,8 +53,37 @@ pub fn dividend_remainder(dividend: usize, divisor: usize) -> (usize, usize) {
 
 // https://play.rust-lang.org/?gist=9ca489c1de25feb2f09a1770e40b62b1&version=stable
 pub fn is_only_numbers(input: &str) -> bool {
-    let chars_are_numeric: Vec<bool> = input.chars().map(|c| c.is_numeric()).collect();
-    !chars_are_numeric.contains(&false)
+    for char in input.chars() {
+        if char.is_numeric() || char == '.' { continue }
+        else { return false }
+    }
+    true
+}
+
+pub fn get_input_as_i64(msg: Option<&str>) -> i64 {
+    loop {
+        if msg != None {
+            println!("{}", msg.unwrap());
+        }
+        let mut usrin = String::from("");
+
+        std::io::stdin()
+            .read_line(&mut usrin)
+            .expect("Failed to read line");
+
+        if is_only_numbers(&usrin) || usrin.contains('.') {
+            println!("Invalid input!");
+            continue;
+        }
+
+        match usrin.trim().parse::<i64>() {
+            Ok(num) => return num,
+            Err(_) => {
+                println!("Invalid input!");
+                continue;
+            }
+        };
+    }
 }
 
 pub fn get_input_as_usize(msg: Option<&str>) -> usize {
@@ -113,10 +144,8 @@ mod tests {
     use crate::atomistic_simulation::SymmetryType;
     use ndarray::prelude::*;
     #[test]
-    fn test2() {
-        // println!("Enter the number of iterations to evolve the system for: ");
-    
-        let times = 20;
+    fn test() {
+        // let times = 20;
         let start = 1.;
         let end = 0.2;
         let num_points = 10;
@@ -133,6 +162,7 @@ mod tests {
             4,
             4,
             SymmetryType::C4V,
+	    0.,
             array![[1., 0.], [0., 1.]],
             0.,
             0.5,
@@ -140,13 +170,10 @@ mod tests {
         );
 
         c4v_driver.load_state(fname);
-
+	let mut initial_mag = 0.;
         for _ in 0..6 {
-            println!(
-                "initial magnitization = {}",
-                &c4v_driver.get_magnitization()
-            );
-            println!("initial energy = {}", &c4v_driver.get_energy());
+	    initial_mag = c4v_driver.get_magnitization();
+	    assert_eq!(initial_mag, 2.);
         }
 
         for i in 0..16 {
@@ -167,3 +194,4 @@ pub mod signal_container;
 pub mod atomistic_simulation;
 pub mod lat_node;
 pub mod lattice_structure;
+pub mod sim_params;
