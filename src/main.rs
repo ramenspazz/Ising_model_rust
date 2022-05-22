@@ -81,13 +81,16 @@ fn main() {
                     }
                 }
                 if first_run {
+                    let anneal_betas = vec![100., 75., 50., 25., 10., 5., 1., 0.01];
+                    println!("\nAnnealing system into a minimum energy state using beta values {:?} for 1,000,000 iterations for each beta value in the Metropolis-Hastings scheme.\n", &anneal_betas);
                     driver_obj.spin_energy(
-                        vec![100., 75., 50., 25., 10., 5., 1., 0.01],
+                        anneal_betas,
                         1_000_000,
                         0,
                         1_000_000,
                         true,
                     );
+                    driver_obj.save_state("minimum_energy_state_anneal.dat");
                     driver_obj.save_state(fname);
                     first_run = false;
                 }

@@ -100,7 +100,6 @@ fn indexmod(
             } else if modnum == 1 {
                 // +y
                 if j + 1 < y_size {
-                    // println!("index {} + xsize < ysize", &index);
                     return Some(index + x_size);
                 } else {
                     return None;
@@ -108,7 +107,6 @@ fn indexmod(
             } else if modnum == 2 {
                 // -x
                 if i > 0 {
-                    // println!("index {} - 1 > 0", &index);
                     return Some(index - 1);
                 } else {
                     return None;
@@ -872,7 +870,7 @@ impl Driver {
         println!("spin_energy finished!");
 
         // save files
-        if true {
+        if anneal != true {
             self.save_files(m_vec, e_vec, c_vec, x_vec, beta_vec);
         }
     }
