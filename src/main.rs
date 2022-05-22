@@ -21,7 +21,7 @@ fn main() {
         }
     }
 
-    println!("Enter the J spin coupling value, x, then the y size of the system in terms of two basis vectors: ");
+    println!("Lattice parameters and external magnetic field value:\n");
     let mut parameters = sim_params::SimulationParameters::new(
         get_input_as_f64(Some("Enter J coupling: ")),
         get_input_as_usize(Some("Enter x size: ")),
