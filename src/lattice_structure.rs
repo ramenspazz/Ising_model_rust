@@ -18,7 +18,9 @@ impl Lattice {
     }
 
     pub fn push(&mut self, item: SpinNode) {
-        if let Ok(value) = self.internal_vector.write().as_mut() { value.push(item) }
+        if let Ok(value) = self.internal_vector.write().as_mut() {
+            value.push(item)
+        }
     }
 
     fn read_line(&mut self, file_name: &str) -> Result<(), std::io::Error> {

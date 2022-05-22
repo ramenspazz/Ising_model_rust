@@ -1,5 +1,3 @@
-
-
 /// Purpose
 /// -------
 /// Returns a tuple with the quotient and remainder of `dividend` / `divisor`.
@@ -51,11 +49,13 @@ pub fn dividend_remainder(dividend: usize, divisor: usize) -> (usize, usize) {
     }
 }
 
-// https://play.rust-lang.org/?gist=9ca489c1de25feb2f09a1770e40b62b1&version=stable
 pub fn is_only_numbers(input: &str) -> bool {
     for char in input.chars() {
-        if char.is_numeric() || char == '.' { continue }
-        else { return false }
+        if char.is_numeric() || char == '.' {
+            continue;
+        } else {
+            return false;
+        }
     }
     true
 }
@@ -142,6 +142,7 @@ pub fn get_input_as_f64(msg: Option<&str>) -> f64 {
 mod tests {
     use crate::atomistic_simulation::Driver;
     use crate::atomistic_simulation::SymmetryType;
+    use crate::sim_params;
     use ndarray::prelude::*;
     #[test]
     fn test() {
@@ -151,29 +152,32 @@ mod tests {
         let num_points = 10;
         let step = (end - start) / num_points as f64;
         let mut beta_list = vec![];
-    
+
         for i in 1..(num_points + 1) {
             beta_list.push((i as f64) * step + start);
         }
-    
-        let fname = "c4v_test.dat";
-        let mut c4v_driver = Driver::new(
+
+        let _fname = "c4v_test.dat";
+
+        let parameters = sim_params::SimulationParameters::new(
             1.,
             4,
             4,
             SymmetryType::C4V,
-	    0.,
+            0.,
             array![[1., 0.], [0., 1.]],
             0.,
             0.5,
-            fname.to_string(),
+            "c4v_test.dat".to_string(),
         );
 
-        c4v_driver.load_state(fname);
-	let mut initial_mag = 0.;
+        let mut c4v_driver = Driver::new(parameters.clone());
+
+        c4v_driver.load_state(parameters.get_fname());
+        let mut initial_mag: f64;
         for _ in 0..6 {
-	    initial_mag = c4v_driver.get_magnitization();
-	    assert_eq!(initial_mag, 2.);
+            initial_mag = c4v_driver.get_magnitization();
+            assert_eq!(initial_mag, 2.);
         }
 
         for i in 0..16 {
@@ -183,15 +187,15 @@ mod tests {
             let energy_f = c4v_driver.get_energy();
             c4v_driver.flip_node_at(i);
             let delta_energy_get_energy = energy_f - energy_i;
-            
+
             assert_eq!(delta_energy_calc, delta_energy_get_energy);
         }
         c4v_driver.stop_threads();
     }
 }
 
-pub mod signal_container;
 pub mod atomistic_simulation;
 pub mod lat_node;
 pub mod lattice_structure;
+pub mod signal_container;
 pub mod sim_params;
