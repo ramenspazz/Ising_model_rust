@@ -41,9 +41,8 @@ impl Lattice {
                         break;
                     }
 
-                    if is_only_numbers(&line) {
-                        println!("Invalid input!");
-                        panic!("Invalid entry in file! exiting.")
+                    if is_only_numbers(&line) != true {
+                        panic!("Invalid entry in file! Got {:?}, Exiting..", &line.as_bytes());
                     }
 
                     match line.trim().parse::<f64>() {

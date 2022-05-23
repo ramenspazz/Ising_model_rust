@@ -50,11 +50,12 @@ pub fn dividend_remainder(dividend: usize, divisor: usize) -> (usize, usize) {
 }
 
 pub fn is_only_numbers(input: &str) -> bool {
-    for char in input.chars() {
-        if char.is_numeric() || char == '.' {
+    for value in input.as_bytes().iter() {
+        if (48 <= *value && *value <= 57) || *value == 46 || *value == 45 || *value == 10 {
             continue;
         } else {
-            return false;
+            println!("failing character is {}", *value);
+            return false
         }
     }
     true
@@ -71,7 +72,7 @@ pub fn get_input_as_i64(msg: Option<&str>) -> i64 {
             .read_line(&mut usrin)
             .expect("Failed to read line");
 
-        if is_only_numbers(&usrin) || usrin.contains('.') {
+        if is_only_numbers(&usrin) != true {
             println!("Invalid input!");
             continue;
         }
@@ -97,7 +98,7 @@ pub fn get_input_as_usize(msg: Option<&str>) -> usize {
             .read_line(&mut usrin)
             .expect("Failed to read line");
 
-        if is_only_numbers(&usrin) || usrin.contains('.') {
+        if is_only_numbers(&usrin) != true {
             println!("Invalid input!");
             continue;
         }
@@ -123,7 +124,7 @@ pub fn get_input_as_f64(msg: Option<&str>) -> f64 {
             .read_line(&mut usrin)
             .expect("Failed to read line");
 
-        if is_only_numbers(&usrin) {
+        if is_only_numbers(&usrin) != true {
             println!("Invalid input!");
             continue;
         }

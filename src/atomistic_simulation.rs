@@ -63,7 +63,7 @@ fn indexmod(
                 }
             } else if modnum == 1 {
                 if (j + 2) < y_size {
-                    // if the y index is 2 less than the
+                    // if the y index is 2 less than the max y heigth
                     return Some(index + 1);
                 }
             } else if modnum == 2 {
@@ -867,12 +867,11 @@ impl Driver {
             }
         } // for beta_val in beta_list end
         bar1.abandon();
-        println!("spin_energy finished!");
-
-        // save files
-        if anneal != true {
+        if anneal == false {
+            println!("spin_energy finished!");
             self.save_files(m_vec, e_vec, c_vec, x_vec, beta_vec);
         }
+        else { println!("Annealing finished!"); }
     }
 
     /// Purpose
