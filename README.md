@@ -1,4 +1,4 @@
-# Ising_model_rust
+# Ising model: rust
 The spin glass ising model programmed in rust
 
 # Running
