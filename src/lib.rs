@@ -195,6 +195,7 @@ mod tests {
     }
 }
 
+pub mod thread_workers;
 pub mod atomistic_simulation;
 pub mod lat_node;
 pub mod lattice_structure;

@@ -5,7 +5,12 @@ use ndarray::prelude::*;
 use rand::{thread_rng, Rng};
 
 fn main() {
-    let mut fname = "";
+    println!("Enter a name to save lattice state files: ");
+    let mut fname = String::from("");
+    std::io::stdin()
+        .read_line(&mut fname)
+        .expect("Failed to read line");
+    
     let mut rand_gen = thread_rng();
 
     let mut usrin: usize;
@@ -37,15 +42,10 @@ fn main() {
         0.5,
         fname.to_string(),
     );
-    fname = if usrin == 0 {
-        "c3v_data.dat"
-    } else {
-        "c4v_data.dat"
-    };
-    parameters.set_fname(fname);
-    let mut driver_obj = ising_model::atomistic_simulation::Driver::new(parameters);
-    driver_obj.save_state(fname);
-    let mut first_run: bool = true;
+
+    parameters.set_fname(&fname);
+    let mut driver_obj = ising_model::atomistic_simulation::Driver::new(parameters.clone());
+    driver_obj.save_state(&fname);
     println!("Note, you can plot at any time with python -O plot.py");
     loop {
         let user_run_stop = get_input_as_i64(Some("Enter 0 to run a simulation, or -1 to quit: "));
@@ -80,7 +80,18 @@ fn main() {
                         continue;
                     }
                 }
-                if first_run {
+                let iteration_scheme = usrin;
+                loop {
+                    usrin = get_input_as_usize(Some("Enter 0 to anneal, 1 to run without anneal: "));
+                    if usrin == 0 || usrin == 1 {
+                        break;
+                    } else {
+                        println!("Invalid input!");
+                        continue;
+                    }
+                }
+                let anneal = if usrin == 0 { true } else { false };
+                if anneal == true {
                     let anneal_betas = vec![100., 75., 50., 25., 10., 5., 1., 0.01];
                     println!("\nAnnealing system into a minimum energy state using beta values {:?} for 1,000,000 iterations for each beta value in the Metropolis-Hastings scheme.\n", &anneal_betas);
                     driver_obj.spin_energy(
@@ -90,11 +101,31 @@ fn main() {
                         1_000_000,
                         true,
                     );
-                    driver_obj.save_state("minimum_energy_state_anneal.dat");
-                    driver_obj.save_state(fname);
-                    first_run = false;
+                    driver_obj.save_state(&fname);
                 }
-                driver_obj.spin_energy(beta_list, times, usrin, ignore_n_runs, false);
+                else {
+                    loop {
+                        println!("Enter 0 to load state from user specified filename or 1 to load from {}: ", &parameters.get_fname());
+                        usrin = get_input_as_usize(None);
+                        if usrin == 0 || usrin == 1 {
+                            break;
+                        } else {
+                            println!("Invalid input!");
+                            continue;
+                        }
+                    }
+                    let load_state = if usrin == 0 { true } else { false };
+                    if load_state == true {
+                        let mut load_fname = String::from("");
+                        std::io::stdin()
+                            .read_line(&mut load_fname)
+                            .expect("Failed to read line");
+                        driver_obj.load_state(&load_fname);
+                    } else {
+                        driver_obj.load_state(&fname);
+                    }
+                }
+                driver_obj.spin_energy(beta_list, times, iteration_scheme, ignore_n_runs, false);
             }
             std::cmp::Ordering::Greater => {
                 println!("invalid input!");
@@ -102,6 +133,5 @@ fn main() {
             }
         }
     }
-
-    driver_obj.stop_threads();
+    // end
 }
