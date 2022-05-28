@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-# import numpy as np
+import numpy as np
 
 My_data: list = list()
 
@@ -16,7 +16,7 @@ try:
     fname = "beta.dat"
     with open(file=fname) as data_file:
         for i, cur_ln in enumerate(data_file):
-            beta_data.append(float(cur_ln))
+            beta_data.append(np.log(float(cur_ln)))
 except Exception:
     print("an error occured!")
 
@@ -57,13 +57,21 @@ except Exception:
     print("an error occured!")
 
 fig, axs = plt.subplots(2, 2)
-axs[0, 0].semilogx(beta_data, My_data)
-axs[0, 0].set_title('Magnitization v. Beta')
-axs[0, 1].semilogx(beta_data, Ey_data, 'tab:orange')
-axs[0, 1].set_title('Dimentionless Energy v. Beta')
-axs[1, 0].semilogx(beta_data, Xy_data, 'tab:green')
-axs[1, 0].set_title('Susceptibility v. Beta')
-axs[1, 1].semilogx(beta_data, Cy_data, 'tab:red')
-axs[1, 1].set_title('Heat Capacity v. Beta')
+axs[0, 0].scatter(beta_data, My_data)
+axs[0, 0].set_xlabel("Log[$\\beta$]")
+axs[0, 0].set_ylabel("Magnitization")
+axs[0, 1].scatter(beta_data, Ey_data, c='tab:orange')
+axs[0, 1].set_xlabel("Log[$\\beta$]")
+axs[0, 1].set_ylabel("Energy")
+axs[1, 0].scatter(beta_data, Xy_data, c='tab:green')
+axs[1, 0].set_xlabel("Log[$\\beta$]")
+axs[1, 0].set_ylabel("Susceptibility")
+axs[1, 1].scatter(beta_data, Cy_data, c='tab:red')
+axs[1, 1].set_xlabel("Log[$\\beta$]")
+axs[1, 1].set_ylabel("Heat Capacity")
+
+for i in range(2):
+    for j in range(2):
+        axs[i,j].grid()
 
 plt.show()

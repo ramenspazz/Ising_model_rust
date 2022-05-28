@@ -13,8 +13,7 @@ use rand::thread_rng;
 use rand::Rng;
 use rayon::prelude::*;
 use std::f64::consts;
-use std::sync::{Arc, RwLock};
-use std::{thread as stdth, time};
+use std::sync::RwLock;
 
 fn mean(data: &[f64]) -> Option<f64> {
     let sum = data.par_iter().sum::<f64>() as f64;
@@ -142,16 +141,16 @@ pub struct Driver {
     num_threads: usize,
     div: usize,
     rem: usize,
-    cluster_threads_started: bool,
     energy_psum_signaler: SignalContainer<f64>,
     cluster_done_signaler: SignalContainer<Array1<f64>>,
     cluster_queue_signaler: SignalContainer<usize>,
-    touched_index_vec: Arc<RwLock<Vec<usize>>>,
+    // touched_index_vec: Arc<RwLock<Vec<usize>>>,
 }
 
 impl Driver {
     pub fn new(parameters: sim_params::SimulationParameters) -> Self {
-        let num_threads = num_cpus::get();
+    // faster this way :(, I still have a lot to learn in rust, but it does work either way at least...
+        let num_threads = 1;//if num_cpus::get() > 1 {num_cpus::get() - 1} else {1};
         let (div, rem) = dividend_remainder(parameters.num_nodes(), num_threads);
         let mut cur_coord: Box<Array1<f64>>;
         let mut rng = thread_rng();
@@ -376,8 +375,8 @@ impl Driver {
 
         // let psum_signaler = SignalContainer::new(cpu_num);
         let energy_signlaer = SignalContainer::new(num_threads);
-        let cluster_done_signaler = SignalContainer::new(num_threads);
-        let cluster_queue_signaler = SignalContainer::new(0);
+        let cluster_done_signaler: SignalContainer<ArrayBase<ndarray::OwnedRepr<f64>, Dim<[usize; 1]>>> = SignalContainer::new(num_threads);
+        let cluster_queue_signaler: SignalContainer<usize> = SignalContainer::new(0);
 
         Self {
             parameters,
@@ -385,16 +384,23 @@ impl Driver {
             num_threads,
             div,
             rem,
-            cluster_threads_started: false,
             energy_psum_signaler: energy_signlaer,
             cluster_done_signaler,
             cluster_queue_signaler,
-            touched_index_vec: Arc::new(RwLock::new(vec![])),
+            // touched_index_vec: Arc::new(RwLock::new(vec![])),
         }
     }
 
     pub fn get_parameters(&self) -> sim_params::SimulationParameters {
         self.parameters.clone()
+    }
+
+    pub fn update_j(&mut self, j_val: f64) {
+        self.parameters.set_j(j_val);
+    }
+
+    pub fn update_b(&mut self, b_val: f64) {
+        self.parameters.set_b(b_val);
     }
 
     pub fn save_state(&self, fname: &str) {
@@ -412,7 +418,7 @@ impl Driver {
         rayon::scope(|s| {
             for i in 0..n_jobs {
                 // println!("starting cluster thread {i}");
-                let shared_touched_vec = self.touched_index_vec.clone();
+                // let shared_touched_vec = self.touched_index_vec.clone();
                 let shared_data = self.internal_lattice.internal_vector.clone();
                 let cluster_queue_signaler = self.cluster_queue_signaler.clone();
                 let cluster_done_signaler = self.cluster_done_signaler.clone();
@@ -423,7 +429,7 @@ impl Driver {
                         .send(thread_workers::thread_cluster_worker(
                                 cluster_queue_signaler,
                                 shared_data,
-                                shared_touched_vec,
+                                // shared_touched_vec,
                                 target_spin,
                                 balance_condition,
                                 ext_mag_field,
@@ -482,23 +488,12 @@ impl Driver {
         energy
     }
 
-    pub fn get_magnitization(&self) -> f64 {
+    pub fn get_magnetization(&self) -> f64 {
         let read_lock_internal_vector = self.internal_lattice.internal_vector.read().unwrap();
         read_lock_internal_vector
             .par_iter()
             .map(|i| i.get_spin())
             .sum()
-    }
-
-    pub fn get_spin_at(&self, index: usize) -> f64 {
-        if let Ok(value) = self.internal_lattice.internal_vector.read() {
-            match value.get(index) {
-                Some(node) => node.get_spin(),
-                None => 0.,
-            }
-        } else {
-            panic!("Couldnt get spin")
-        }
     }
 
     /// Flips the spin pointed to by the parameter `index`. This function requires a write lock on `internal_lattice.internal_vector`
@@ -643,11 +638,11 @@ impl Driver {
             assert!(ignore_n_runs < times);
         }
 
-        let (temp_magnitization, initial_energy) = (self.get_magnitization(), self.get_energy());
-        let initial_magnitization = temp_magnitization.abs();
+        let (temp_magnetization, initial_energy) = (self.get_magnetization(), self.get_energy());
+        let initial_magnetization = temp_magnetization.abs();
         println!(
-            "\nThe initial energy is {}, and the initial magnitization is {}.\n",
-            initial_energy, initial_magnitization
+            "\nThe initial energy is {}, and the initial magnetization is {}.\n",
+            initial_energy, initial_magnetization
         );
 
         let mut m_vec: Vec<f64> = vec![];
@@ -663,7 +658,7 @@ impl Driver {
         // load the initial state at tbe begining of each new beta
         for beta_val in beta_vec.iter() {
             let balance_condition = if iteration_scheme == 1 {
-                1. - consts::E.powf(-2. * beta_val * self.parameters.get_j())
+                1. - consts::E.powf(-2. * beta_val * self.parameters.get_j() * self.parameters.get_spin_unit().powf(2.))
             } else {
                 0.
             };
@@ -671,9 +666,9 @@ impl Driver {
                 // .load_state_from_file("minimum_energy_state_anneal.dat".to_string());
                 .load_state_from_file(self.parameters.get_fname().to_string());
             
-            let mut magnitization: f64 = initial_magnitization;
+            let mut magnetization: f64 = initial_magnetization;
             let mut energy: f64 = initial_energy;
-            let mut deltas = array![0., 0.];
+            let mut deltas: ArrayBase<ndarray::OwnedRepr<f64>, Dim<[usize; 1]>> = array![0., 0.];
             let mut mag_vec = vec![];
             let mut energy_vec = vec![];
 
@@ -694,8 +689,8 @@ impl Driver {
                     // // preform a sum and sum of squares for statistics later
                     energy += deltas[0];
                     energy_vec.push(energy / n);
-                    magnitization += deltas[1];
-                    mag_vec.push(magnitization / n);
+                    magnetization += deltas[1];
+                    mag_vec.push(magnetization / n);
                 }
                 bar1.inc(1);
             }
@@ -728,7 +723,17 @@ impl Driver {
         'node_selection: loop {
             target_index = rng_spin_select
                 .gen_range(0..(self.parameters.get_xsize() * self.parameters.get_ysize() - 1));
-            target_spin = self.get_spin_at(target_index);
+            target_spin = {
+                let ref this = self;
+                if let Ok(value) = this.internal_lattice.internal_vector.read() {
+                    match value.get(target_index) {
+                        Some(node) => node.get_spin(),
+                        None => 0.,
+                    }
+                } else {
+                    panic!("Couldnt get spin")
+                }
+            };
             if target_spin != 0. {
                 break 'node_selection;
             } else {
@@ -748,7 +753,17 @@ impl Driver {
                         // SAFETY: bounds checked in Driver::new, garaunteed valid return.
                         unsafe {
                             let nbr_index = *read_lock_nbrs.get_unchecked(i);
-                            let nbr_spin = self.get_spin_at(nbr_index);
+                            let nbr_spin = {
+                                let ref this = self;
+                                if let Ok(value) = this.internal_lattice.internal_vector.read() {
+                                    match value.get(nbr_index) {
+                                        Some(node) => node.get_spin(),
+                                        None => 0.,
+                                    }
+                                } else {
+                                    panic!("Couldnt get spin")
+                                }
+                            };
                             if nbr_spin == target_spin {
                                 // if the spin is the same as the randomly picked node, add it to the
                                 // queue.
@@ -764,21 +779,6 @@ impl Driver {
             // spin up threads for generating a cluster flip
             deltas = deltas + self.get_cluster(target_spin, balance_condition);
 
-            unsafe {
-                // unmark all touched nodes, I cant really think of a better way to do this at the moment.
-                let mut write_lock_touched_index_vector = self.touched_index_vec.write().unwrap();
-                if let Some(touched_index) = write_lock_touched_index_vector.pop() {
-                    let mut write_lock_internal_vector =
-                        self.internal_lattice.internal_vector.write().unwrap();
-                    write_lock_internal_vector
-                        .get_unchecked_mut(touched_index)
-                        .marked
-                        .write()
-                        .unwrap()
-                        .set_unmark();
-                    // drop(write_lock_internal_vector);
-                }
-            }
         }
         deltas
     }
@@ -795,7 +795,17 @@ impl Driver {
         'node_selection: loop {
             target_index = rngspin
                 .gen_range(0..(self.parameters.get_xsize() * self.parameters.get_ysize() - 1));
-            target_spin = self.get_spin_at(target_index);
+            target_spin = {
+                let ref this = self;
+                if let Ok(value) = this.internal_lattice.internal_vector.read() {
+                    match value.get(target_index) {
+                        Some(node) => node.get_spin(),
+                        None => 0.,
+                    }
+                } else {
+                    panic!("Couldnt get spin")
+                }
+            };
             if target_spin != 0. {
                 break 'node_selection;
             } else {

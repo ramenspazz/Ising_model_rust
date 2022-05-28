@@ -7,7 +7,7 @@ use crate::{signal_container::SignalContainer, lat_node::{SpinNode, StateValue}}
 pub fn thread_cluster_worker(
     cluster_queue_signaler: SignalContainer<usize>,
     shared_data: Arc<RwLock<Vec<SpinNode>>>,
-    shared_touched_vec: Arc<RwLock<Vec<usize>>>,
+    // shared_touched_vec: Arc<RwLock<Vec<usize>>>,
     target_spin: f64,
     balance_condition: f64,
     ext_mag_field: f64,
@@ -15,6 +15,7 @@ pub fn thread_cluster_worker(
 ) -> Array1<f64> {
     let mut rng = thread_rng();
     let mut deltas = Array1::from(vec![0., 0.]);
+    let mut touched = vec![];
     'cluster_loop : loop {
         if let Ok(node_index) = cluster_queue_signaler.try_recv() {
             let read_lock_internal_vec = shared_data.read().unwrap();
@@ -25,11 +26,18 @@ pub fn thread_cluster_worker(
                 != StateValue::Unmarked
             {
                 continue 'cluster_loop;
-            } else {
-                let mut write_lock_touched_index_vector =
-                    shared_touched_vec.write().unwrap();
-                write_lock_touched_index_vector.push(node_index);
-                drop(write_lock_touched_index_vector);
+            } 
+            if target_spin
+            != read_lock_internal_vec
+                .get(node_index)
+                .unwrap()
+                .get_spin()
+            {
+                continue 'cluster_loop;
+            }
+            else
+            {
+                touched.push(node_index);
                 read_lock_internal_vec
                     .get(node_index)
                     .unwrap()
@@ -37,14 +45,6 @@ pub fn thread_cluster_worker(
                     .write()
                     .unwrap()
                     .set_marked();
-                if target_spin
-                    != read_lock_internal_vec
-                        .get(node_index)
-                        .unwrap()
-                        .get_spin()
-                {
-                    continue 'cluster_loop;
-                }
             }
             drop(read_lock_internal_vec);
             if rng.gen_range(0_f64..1_f64) < balance_condition {
@@ -63,16 +63,15 @@ pub fn thread_cluster_worker(
                     .unwrap()
                     .iter()
                 {
-                    let read_lock_internal_vec =
-                        shared_data.read().unwrap();
-                    let target_of_cur_target = read_lock_internal_vec
-                        .get(*nbrs_index_of_flip_node)
-                        .unwrap();
-                    let target_of_cur_target_nbrs_lock =
-                        target_of_cur_target.neighbors.read().unwrap();
                     // cycle through the neighbors of the neighbors of the suggested node to flip (wordy, yeah)
                     for nbrs_of_nbrs_index_of_flip_node in
-                        target_of_cur_target_nbrs_lock.iter()
+                    shared_data
+                        .read()
+                        .unwrap()
+                        .get(*nbrs_index_of_flip_node)
+                        .unwrap().neighbors
+                        .read()
+                        .unwrap().iter()
                     {
                         let read_lock_internal_vec =
                             shared_data.read().unwrap();
@@ -87,32 +86,52 @@ pub fn thread_cluster_worker(
                             // get the energy using a flipped value of spin for nbr_of_nbrs_of_flip_node
                             energy_f -= -nbr_of_nbrs_of_flip_node
                                 .get_spin()
-                                * target_of_cur_target.get_spin();
+                                * shared_data
+                                .read()
+                                .unwrap()
+                                .get(*nbrs_index_of_flip_node)
+                                .unwrap().get_spin();
                             mag_energy_f -= -ext_mag_field
-                                * target_of_cur_target.get_spin();
+                                * shared_data
+                                .read()
+                                .unwrap()
+                                .get(*nbrs_index_of_flip_node)
+                                .unwrap().get_spin();
                         } else {
                             energy_f -= nbr_of_nbrs_of_flip_node
                                 .get_spin()
-                                * target_of_cur_target.get_spin();
+                                * shared_data
+                                .read()
+                                .unwrap()
+                                .get(*nbrs_index_of_flip_node)
+                                .unwrap().get_spin();
                             mag_energy_i -= ext_mag_field
-                                * target_of_cur_target.get_spin();
+                                * shared_data
+                                .read()
+                                .unwrap()
+                                .get(*nbrs_index_of_flip_node)
+                                .unwrap().get_spin();
                         }
                         // get the regular energy
                         energy_i -= nbr_of_nbrs_of_flip_node.get_spin()
-                            * target_of_cur_target.get_spin();
+                            * shared_data
+                            .read()
+                            .unwrap()
+                            .get(*nbrs_index_of_flip_node)
+                            .unwrap().get_spin();
                     }
                 }
                 deltas = deltas + array![(energy_f - energy_i) / spin_unit
                     + (mag_energy_f - mag_energy_i), 0.];
                 deltas = deltas + array![0., -target_spin];
-                let mut write_lock_internal_vector =
-                    shared_data.write().unwrap();
-                // flip the spin
-                write_lock_internal_vector
-                    .get_mut(node_index)
-                    .unwrap()
-                    .flip_spin();
-                drop(write_lock_internal_vector);
+                unsafe {
+                    // flip the node
+                    shared_data
+                        .write()
+                        .unwrap()
+                        .get_unchecked_mut(node_index)
+                        .flip_spin();
+                }
                 let read_lock_internal_vec =
                     shared_data.read().unwrap();
                 let nbs_lock_of_target = read_lock_internal_vec
@@ -138,6 +157,19 @@ pub fn thread_cluster_worker(
             }
         } else {
             break 'cluster_loop
+        }
+    }
+    unsafe {
+        // unmark all touched nodes, I cant really think of a better way to do this at the moment.
+        if let Some(touched_index) = touched.pop() {
+            let mut write_lock_internal_vector =
+                shared_data.write().unwrap();
+            write_lock_internal_vector
+                .get_unchecked_mut(touched_index)
+                .marked
+                .write()
+                .unwrap()
+                .set_unmark();
         }
     }
     deltas

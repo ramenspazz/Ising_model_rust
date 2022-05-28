@@ -75,4 +75,10 @@ impl SimulationParameters {
     pub fn set_fname(&mut self, fname: &str) {
         self.fname = fname.to_string();
     }
+    pub fn set_j(&mut self, j_val: f64) {
+        self.j = j_val;
+    }
+    pub fn set_b(&mut self, b_val: f64) {
+        self.b_field = b_val;
+    }
 }

@@ -177,7 +177,7 @@ mod tests {
         c4v_driver.load_state(parameters.get_fname());
         let mut initial_mag: f64;
         for _ in 0..6 {
-            initial_mag = c4v_driver.get_magnitization();
+            initial_mag = c4v_driver.get_magnetization();
             assert_eq!(initial_mag, 2.);
         }
 
@@ -191,7 +191,6 @@ mod tests {
 
             assert_eq!(delta_energy_calc, delta_energy_get_energy);
         }
-        c4v_driver.stop_threads();
     }
 }
 
