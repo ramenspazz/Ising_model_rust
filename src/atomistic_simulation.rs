@@ -165,11 +165,10 @@ impl Driver {
                 for j in 0..parameters.get_ysize() {
                     for i in 0..parameters.get_xsize() {
                         let cur_index = i + j * parameters.get_xsize();
-                        let genval: f64 = rng.gen_range(0_f64..1_f64);
                         // randomization conditions would go here or somewhere near here.
                         cur_coord = Box::new(
                             (i as f64) * &parameters.get_basis().slice(&s1)
-                                + (j as f64) * &parameters.get_basis().slice(&s2),
+                            + (j as f64) * &parameters.get_basis().slice(&s2),
                         );
                         // construct neighbors vector
                         let mut neighbors = vec![];
@@ -181,11 +180,12 @@ impl Driver {
                                 parameters.get_ysize(),
                                 parameters.get_symtype(),
                             );
-
+                            
                             if let Some(valid_index) = result {
                                 neighbors.push(valid_index);
                             }
                         }
+                        let genval: f64 = rng.gen_range(0_f64..1_f64);
                         if genval >= parameters.get_spin_up_chance() {
                             give_map.push(SpinNode::cons_node(
                                 parameters.get_spin_unit(),
@@ -637,8 +637,10 @@ impl Driver {
         if !anneal {
             assert!(ignore_n_runs < times);
         }
-
-        let (temp_magnetization, initial_energy) = (self.get_magnetization(), self.get_energy());
+        
+        let n = self.parameters.num_nodes() as f64;
+        let spin_unit = self.parameters.get_spin_unit();
+        let (temp_magnetization, initial_energy) = (self.get_magnetization()  / (n * spin_unit), self.get_energy() / (n * spin_unit));
         let initial_magnetization = temp_magnetization.abs();
         println!(
             "\nThe initial energy is {}, and the initial magnetization is {}.\n",
@@ -649,7 +651,6 @@ impl Driver {
         let mut e_vec: Vec<f64> = vec![];
         let mut c_vec: Vec<f64> = vec![];
         let mut x_vec: Vec<f64> = vec![];
-        let n = self.parameters.num_nodes() as f64;
 
         let len_beta = beta_vec.len();
         let tot_time: u64 = times as u64 * len_beta as u64;
@@ -687,10 +688,10 @@ impl Driver {
                 // data plot.
                 if cur_t + 1 > ignore_n_runs && !anneal {
                     // // preform a sum and sum of squares for statistics later
-                    energy += deltas[0];
-                    energy_vec.push(energy / n);
-                    magnetization += deltas[1];
-                    mag_vec.push(magnetization / n);
+                    energy += deltas[0]  / (n * spin_unit);
+                    energy_vec.push(energy);
+                    magnetization += deltas[1]  / (n * spin_unit);
+                    mag_vec.push(magnetization);
                 }
                 bar1.inc(1);
             }
@@ -833,12 +834,12 @@ impl Driver {
         deltas
     }
 
-    fn unmark_all_nodes(&mut self) {
-        let mut write_lock = self.internal_lattice.internal_vector.write().unwrap();
-        for node in write_lock.iter_mut() {
-            node.marked.write().unwrap().set_unmark();
-        }
-    }
+    // fn unmark_all_nodes(&mut self) {
+    //     let mut write_lock = self.internal_lattice.internal_vector.write().unwrap();
+    //     for node in write_lock.iter_mut() {
+    //         node.marked.write().unwrap().set_unmark();
+    //     }
+    // }
 
     pub fn calculate_energy_change_of_suggested_flip(&self, target_index: usize) -> f64 {
         let mut energy_i = 0.;
