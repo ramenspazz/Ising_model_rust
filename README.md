@@ -2,7 +2,7 @@
 The spin glass ising model programmed in rust
 
 # Running
-The easiest way to run this is to run ```cargo run --release && python -O plot.py```. My build target was UNIX, so if you are on windows you might need to build this yourself.
+The easiest way to run this is to run `cargo run --release`, then running `python -O plot.py` when you want to visualize the output files' data.
 
 # Install RUST
 Please follow the instructions here on the RUST-lang website https://www.rust-lang.org/tools/install.
